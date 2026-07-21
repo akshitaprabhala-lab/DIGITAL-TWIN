@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
-import { Sparkles, FlaskConical, ShieldCheck, TriangleAlert, Check } from "lucide-react";
+import { Sparkles, FlaskConical, ShieldCheck, TriangleAlert, Check, Layers2 } from "lucide-react";
 import { toast } from "sonner";
 
 export default function DoseOptimiser({ patientId, drug, threshold, onSim, onRec, rec }) {
@@ -134,6 +134,33 @@ export default function DoseOptimiser({ patientId, drug, threshold, onSim, onRec
           )}
 
           <p className="text-xs leading-relaxed text-twin-ink whitespace-pre-wrap">{rec.rationale}</p>
+
+          {rec.combination && (
+            <div data-testid="combination-card" className="rise bg-twin-amber/5 border border-twin-amber/30 rounded-lg p-3 space-y-1.5">
+              <div className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest text-twin-amber">
+                <Layers2 className="h-3 w-3" /> Combination therapy suggested
+              </div>
+              <p className="text-[11px] text-twin-muted leading-relaxed">
+                Single-agent {rec.drug.name} plateaus outside the band — add a second-line agent:
+              </p>
+              <div className="font-mono text-xs space-y-0.5">
+                <div className="flex justify-between">
+                  <span>{rec.combination.primary.name}</span>
+                  <span className="font-semibold">{rec.combination.primary.dose} {rec.drug.unit}</span>
+                </div>
+                <div className="flex justify-between text-twin-amber">
+                  <span>+ {rec.combination.secondary.name}</span>
+                  <span className="font-semibold">{rec.combination.secondary.dose} {rec.combination.secondary.unit}</span>
+                </div>
+                <div className="flex justify-between border-t border-twin-amber/20 pt-1 mt-1">
+                  <span className="text-twin-muted">combined {rec.target_label}</span>
+                  <span className="font-semibold text-twin-teal">
+                    {rec.baseline_value} → {rec.combination.predicted_value}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
 
           <div className="flex items-start gap-1.5 text-[11px] text-twin-muted">
             <ShieldCheck className="h-3.5 w-3.5 mt-0.5 shrink-0" /> {rec.drug.side_effects}

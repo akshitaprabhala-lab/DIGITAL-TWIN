@@ -110,6 +110,117 @@ def simulate_glucose(
     }
 
 
+# ---------------------------------------------------------------------------
+# Cardiovascular mechanistic model (PK/PD) — blood pressure response
+#   Daily oral dosing -> depot -> central plasma -> effect compartment ->
+#   saturable (Emax) reduction of MAP -> systolic/diastolic tracking MAP.
+# ---------------------------------------------------------------------------
+CV_KA = 6.0        # 1/day  absorption
+CV_KE = 1.2        # 1/day  plasma elimination
+CV_KEO = 0.22      # 1/day  effect-site equilibration (slow -> weeks to full effect)
+CV_IMAX = 0.20     # max fractional MAP reduction (ACE-inhibitor class ceiling)
+CV_F = 0.25        # oral bioavailability
+CV_KMAP = 3.0      # 1/day  MAP tracks its target
+
+
+def simulate_cardiovascular(*, systolic0, diastolic0, agents,
+                            duration_days=28, dt=0.02):
+    """Integrate a PK/PD blood-pressure model for one or more once-daily agents.
+    `agents` is a list of dicts: {ec50, dose, imax, keo?}. Effects sum (capped)
+    so combination therapy produces additive MAP reduction.
+    Returns systolic & diastolic time series (days) plus steady-state values.
+    """
+    st = [{"depot": 0.0, "Cp": 0.0, "Ce": 0.0,
+           "ec50": a["ec50"], "dose": a["dose"], "imax": a.get("imax", CV_IMAX),
+           "keo": a.get("keo", CV_KEO)} for a in agents if a["dose"] > 0]
+    sys, dia = systolic0, diastolic0
+    map0 = diastolic0 + (systolic0 - diastolic0) / 3.0
+    pp = (systolic0 - diastolic0)
+    times, syslist, dialist = [], [], []
+    steps = int(duration_days / dt)
+    last_day = -1
+    for i in range(steps + 1):
+        t = i * dt
+        day = int(t)
+        if day != last_day:
+            for a in st:
+                a["depot"] += a["dose"] * CV_F
+            last_day = day
+        times.append(round(t, 2))
+        syslist.append(round(sys, 1))
+        dialist.append(round(dia, 1))
+        E = 0.0
+        for a in st:
+            a["depot"] += (-CV_KA * a["depot"]) * dt
+            a["Cp"] += (CV_KA * a["depot"] - CV_KE * a["Cp"]) * dt
+            a["Ce"] += (a["keo"] * (a["Cp"] - a["Ce"])) * dt
+            E += a["imax"] * a["Ce"] / (a["ec50"] + a["Ce"])
+        E = min(E, 0.36)                              # physiologic ceiling
+        map_target = map0 * (1 - E)
+        cur_map = dia + pp / 3.0
+        cur_map += CV_KMAP * (map_target - cur_map) * dt
+        dia = cur_map - pp / 3.0
+        sys = dia + pp * (1 - 0.15 * E)
+    return {
+        "times": times, "systolic": syslist, "diastolic": dialist,
+        "final_systolic": round(sys, 1), "final_diastolic": round(dia, 1),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Respiratory mechanistic model — SpO2 response to an inhaled bronchodilator
+#   inhaled dose -> plasma -> effect site -> bronchodilation (Emax) ->
+#   improved alveolar ventilation -> PaO2 -> SaO2 via O2-Hb dissociation (Hill).
+# ---------------------------------------------------------------------------
+RESP_KE = 0.0029   # 1/min  plasma decay (t1/2 ~ 4h)
+RESP_KEO = 0.06    # 1/min  effect onset (~15-25 min)
+RESP_IMAX = 1.0    # max bronchodilation fraction
+RESP_HILL_N = 2.7  # O2-Hb dissociation Hill coefficient
+RESP_P50 = 26.0    # mmHg  PaO2 at 50% SaO2
+RESP_HR_MAX = 16   # bpm  max tachycardia side-effect at full effect
+
+
+def _sao2_from_pao2(pao2):
+    return 100.0 * (pao2 ** RESP_HILL_N) / (RESP_P50 ** RESP_HILL_N + pao2 ** RESP_HILL_N)
+
+
+def simulate_respiratory(*, spo2_0, heart_rate0, drug_ic50, dose,
+                         duration_min=360, dt=0.5, pao2_gain=22.0):
+    """Integrate an inhaled-bronchodilator SpO2 model.
+    Recovers baseline PaO2 from the patient's SpO2 via the dissociation curve,
+    then raises ventilation/PaO2 with bronchodilation and re-derives SaO2.
+    Returns SpO2 & heart-rate series (minutes) + peak SpO2.
+    """
+    # invert Hill to get baseline PaO2 from measured SpO2
+    s = min(max(spo2_0, 50.0), 99.5) / 100.0
+    pao2_base = RESP_P50 * (s / (1 - s)) ** (1.0 / RESP_HILL_N)
+    Cp = float(dose)          # inhaled bolus (arbitrary units ~ mcg)
+    Ce = 0.0
+    spo2 = spo2_0
+    hr = heart_rate0
+    times, spo2list, hrlist = [], [], []
+    steps = int(duration_min / dt)
+    for i in range(steps + 1):
+        t = i * dt
+        times.append(round(t, 1))
+        spo2list.append(round(spo2, 1))
+        hrlist.append(round(hr, 1))
+        Cp += (-RESP_KE * Cp) * dt
+        Ce += (RESP_KEO * (Cp - Ce)) * dt
+        B = RESP_IMAX * Ce / (drug_ic50 + Ce)
+        pao2 = pao2_base + pao2_gain * B
+        spo2_target = min(_sao2_from_pao2(pao2), 99.0)
+        spo2 += 0.15 * (spo2_target - spo2)
+        hr_target = heart_rate0 + RESP_HR_MAX * B
+        hr += 0.12 * (hr_target - hr)
+    peak = max(spo2list)
+    return {
+        "times": times, "spo2": spo2list, "heart_rate": hrlist,
+        "peak_spo2": round(peak, 1), "final_spo2": round(spo2list[-1], 1),
+        "peak_heart_rate": round(max(hrlist), 1),
+    }
+
+
 if __name__ == "__main__":
     healthy = simulate_glucose(si_factor=1.0, beta_factor=1.0, basal_glucose=90)
     t2d = simulate_glucose(si_factor=0.35, beta_factor=0.45, basal_glucose=135)
@@ -126,3 +237,18 @@ if __name__ == "__main__":
     print("T2D+MET  peak=%.0f @%.0fmin  settle=%s  2h=%.0f" % (
         t2d_metformin["peak_glucose"], t2d_metformin["peak_time_min"],
         t2d_metformin["settle_time_min"], t2d_metformin["two_hour_glucose"]))
+
+    for d in (0, 5, 20, 40):
+        cv = simulate_cardiovascular(systolic0=156, diastolic0=96,
+                                     agents=[{"ec50": 2.5, "dose": d}])
+        print("LISINOPRIL %2dmg -> systolic %.0f  diastolic %.0f" % (
+            d, cv["final_systolic"], cv["final_diastolic"]))
+    combo = simulate_cardiovascular(systolic0=156, diastolic0=96,
+                                    agents=[{"ec50": 2.5, "dose": 40},
+                                            {"ec50": 1.2, "dose": 10, "imax": 0.16}])
+    print("LIS40+AMLO10 -> systolic %.0f  diastolic %.0f" % (
+        combo["final_systolic"], combo["final_diastolic"]))
+    for d in (0, 100, 200, 400):
+        rp = simulate_respiratory(spo2_0=91, heart_rate0=92, drug_ic50=90, dose=d)
+        print("SALBUTAMOL %3dmcg -> peak SpO2 %.1f  final %.1f  peak HR %.0f" % (
+            d, rp["peak_spo2"], rp["final_spo2"], rp["peak_heart_rate"]))

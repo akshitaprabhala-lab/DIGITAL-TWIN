@@ -6,12 +6,16 @@ load_dotenv(ROOT_DIR / ".env")
 
 import os
 import uuid
+import json
+import random
+import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 
 import jwt
 import bcrypt
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends
+from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, EmailStr, Field
@@ -130,6 +134,13 @@ class OptimiseInput(BaseModel):
 class SaveCaseInput(BaseModel):
     patient_id: str
     payload: Dict[str, Any]
+
+
+class TrialInput(BaseModel):
+    drug_id: str
+    cohort_size: int = 60
+    threshold: str = "standard"
+    seed: Optional[int] = 42
 
 
 # --------------------------------------------------------------------------
@@ -274,8 +285,9 @@ async def disease_scan(body: Dict[str, Any], user: dict = Depends(get_current_us
 
 
 # ---------------- Simulation (drug test on twin) ----------------
-def build_trajectory(patient, drug, dose, threshold, meal_carbs):
+def build_trajectory(patient, drug, dose, threshold, meal_carbs, secondary=None, sdose=0):
     twin = catalog.derive_twin_params(patient["parameters"], patient.get("weight_kg", 70))
+    params = patient["parameters"]
     target = drug["target_param"]
     p = catalog.PARAMETERS[target]
     band = p.get(threshold, p["standard"])
@@ -285,28 +297,66 @@ def build_trajectory(patient, drug, dose, threshold, meal_carbs):
             weight_kg=twin["weight_kg"], basal_glucose=twin["basal_glucose"],
             basal_insulin=twin["basal_insulin"], si_factor=twin["si_factor"],
             beta_factor=twin["beta_factor"], meal_carbs_g=meal_carbs)
-        offset, si_boost = catalog.metformin_metabolic_effect(dose)
+        if drug["id"] == "metformin":
+            offset, si_boost = catalog.metformin_metabolic_effect(dose)
+        else:  # empagliflozin
+            offset, si_boost = catalog.empagliflozin_effect(dose), 1.0
+        if secondary:  # combination adds the second agent's offset
+            offset += (catalog.empagliflozin_effect(sdose) if secondary["id"] == "empagliflozin"
+                       else catalog.metformin_metabolic_effect(sdose)[0])
         treated = twin_engine.simulate_glucose(
             weight_kg=twin["weight_kg"], basal_glucose=twin["basal_glucose"],
             basal_insulin=twin["basal_insulin"], si_factor=twin["si_factor"],
             beta_factor=twin["beta_factor"], meal_carbs_g=meal_carbs,
             glucose_offset=offset, si_boost=si_boost)
         series = [{"t": base["times"][i], "baseline": base["glucose"][i],
-                   "treated": treated["glucose"][i],
-                   "insulin_base": base["insulin"][i], "insulin_treated": treated["insulin"][i]}
+                   "treated": treated["glucose"][i]}
                   for i in range(len(base["times"]))]
-        predicted = round(twin["basal_glucose"] + offset, 1)
         return {
             "system": "metabolic", "target": target, "target_label": p["label"],
             "unit": p["unit"], "band": band, "x_label": "minutes", "x_unit": "min",
-            "series": series, "baseline_value": twin["basal_glucose"],
-            "predicted_value": predicted, "peak_baseline": base["peak_glucose"],
-            "peak_treated": treated["peak_glucose"], "two_hour_treated": treated["two_hour_glucose"],
+            "series": series, "baseline_value": round(twin["basal_glucose"], 1),
+            "predicted_value": round(twin["basal_glucose"] + offset, 1),
+            "peak_baseline": base["peak_glucose"], "peak_treated": treated["peak_glucose"],
         }
 
-    # delta model: approach new steady state
-    current = float(patient["parameters"].get(target, band[0]))
-    predicted = catalog.predict_param_after_drug(current, drug, dose)
+    if drug["system"] == "cardiovascular":
+        sys0 = float(params.get("systolic_bp", 150))
+        dia0 = float(params.get("diastolic_bp", 92))
+        agents = [{"ec50": drug["ec50"], "dose": dose, "imax": drug["imax"]}]
+        if secondary:
+            agents.append({"ec50": secondary["ec50"], "dose": sdose, "imax": secondary["imax"]})
+        cv = twin_engine.simulate_cardiovascular(systolic0=sys0, diastolic0=dia0, agents=agents)
+        step = max(1, len(cv["times"]) // 60)
+        series = [{"t": cv["times"][i], "baseline": sys0, "treated": cv["systolic"][i],
+                   "diastolic": cv["diastolic"][i]}
+                  for i in range(0, len(cv["times"]), step)]
+        return {
+            "system": "cardiovascular", "target": target, "target_label": p["label"],
+            "unit": p["unit"], "band": band, "x_label": "days", "x_unit": "d",
+            "series": series, "baseline_value": round(sys0, 1),
+            "predicted_value": cv["final_systolic"], "final_diastolic": cv["final_diastolic"],
+        }
+
+    if drug["system"] == "respiratory":
+        rp = twin_engine.simulate_respiratory(
+            spo2_0=float(params.get("spo2", 92)),
+            heart_rate0=float(params.get("heart_rate", 80)),
+            drug_ic50=drug["ic50"], dose=dose)
+        step = max(1, len(rp["times"]) // 60)
+        series = [{"t": rp["times"][i], "baseline": params.get("spo2", 92),
+                   "treated": rp["spo2"][i], "heart_rate": rp["heart_rate"][i]}
+                  for i in range(0, len(rp["times"]), step)]
+        return {
+            "system": "respiratory", "target": target, "target_label": p["label"],
+            "unit": p["unit"], "band": band, "x_label": "minutes", "x_unit": "min",
+            "series": series, "baseline_value": round(float(params.get("spo2", 92)), 1),
+            "predicted_value": rp["peak_spo2"], "peak_heart_rate": rp["peak_heart_rate"],
+        }
+
+    # delta model (hematologic / endocrine)
+    current = float(params.get(target, band[0]))
+    predicted = catalog.predict_param_after_drug(params, drug, dose)
     days = drug.get("response_days") or 14
     tau = days / 3.0
     n = 40
@@ -352,7 +402,8 @@ async def optimise(body: OptimiseInput, user: dict = Depends(get_current_user)):
     p = catalog.PARAMETERS[target]
     band = p.get(body.threshold, p["standard"])
     lo, hi = band
-    current = float(patient["parameters"].get(target, hi))
+    params = patient["parameters"]
+    current = float(params.get(target, hi))
 
     # search dose space for smallest dose bringing predicted value into band
     doses, best = [], None
@@ -361,31 +412,67 @@ async def optimise(body: OptimiseInput, user: dict = Depends(get_current_user)):
         doses.append(round(d, 3))
         d += drug["step"]
     for dose in doses:
-        predicted = catalog.predict_param_after_drug(current, drug, dose)
-        in_band = lo <= predicted <= hi
-        if in_band and best is None:
+        predicted = catalog.predict_param_after_drug(params, drug, dose)
+        if lo <= predicted <= hi and best is None:
             best = {"dose": dose, "predicted": round(predicted, 2)}
     exceeds_max = False
     if best is None:
-        # not achievable within max_dose -> report best effort at max_dose
-        predicted = catalog.predict_param_after_drug(current, drug, drug["max_dose"])
+        predicted = catalog.predict_param_after_drug(params, drug, drug["max_dose"])
         best = {"dose": drug["max_dose"], "predicted": round(predicted, 2)}
         exceeds_max = not (lo <= predicted <= hi)
 
-    # confidence: how far into band + within recommended range
+    # combination therapy: single agent can't reach target -> add second-line drug
+    combination = None
+    if exceeds_max and drug.get("combine_with"):
+        secondary = catalog.DRUG_BY_ID.get(drug["combine_with"])
+        sdoses = []
+        sd = secondary["min_dose"]
+        while sd <= secondary["max_dose"] + 1e-6:
+            sdoses.append(round(sd, 3))
+            sd += secondary["step"]
+        combo_best = None
+        for sdose in sdoses:
+            pred = catalog.predict_combination(params, drug, drug["max_dose"], secondary, sdose)
+            if lo <= pred <= hi and combo_best is None:
+                combo_best = {"sdose": sdose, "predicted": round(pred, 2)}
+        if combo_best is None:
+            pred = catalog.predict_combination(params, drug, drug["max_dose"],
+                                               secondary, secondary["max_dose"])
+            combo_best = {"sdose": secondary["max_dose"], "predicted": round(pred, 2)}
+        combo_reaches = lo <= combo_best["predicted"] <= hi
+        combination = {
+            "primary": {"id": drug["id"], "name": drug["name"], "unit": drug["unit"],
+                        "dose": drug["max_dose"]},
+            "secondary": {"id": secondary["id"], "name": secondary["name"],
+                          "unit": secondary["unit"], "dose": combo_best["sdose"],
+                          "side_effects": secondary["side_effects"]},
+            "predicted_value": combo_best["predicted"], "achieves_target": combo_reaches,
+        }
+
+    # confidence
+    ref_pred = combination["predicted_value"] if combination else best["predicted"]
     margin = 0.0
     if hi > lo:
-        centred = 1.0 - abs((best["predicted"] - (lo + hi) / 2) / ((hi - lo) / 2))
+        centred = 1.0 - abs((ref_pred - (lo + hi) / 2) / ((hi - lo) / 2))
         margin = max(0.0, min(1.0, centred))
-    dose_penalty = 0.15 if best["dose"] >= drug["max_dose"] else 0.0
+    dose_penalty = 0.15 if best["dose"] >= drug["max_dose"] and not combination else 0.0
+    achieves = (combination["achieves_target"] if combination else not exceeds_max)
     confidence = round(max(0.35, min(0.95, 0.55 + 0.4 * margin - dose_penalty)), 2)
-    if exceeds_max:
+    if not achieves:
         confidence = round(min(confidence, 0.45), 2)
 
-    trajectory = build_trajectory(patient, drug, best["dose"], body.threshold, 60)
+    # trajectory: combination if present, else single
+    if combination:
+        secondary = catalog.DRUG_BY_ID[drug["combine_with"]]
+        trajectory = build_trajectory(patient, drug, drug["max_dose"], body.threshold, 60,
+                                      secondary=secondary, sdose=combination["secondary"]["dose"])
+    else:
+        trajectory = build_trajectory(patient, drug, best["dose"], body.threshold, 60)
+
     rationale = await llm_service.dose_rationale(
         patient["name"], drug, best["dose"], p["label"], round(current, 2),
-        best["predicted"], f"[{lo}–{hi}] {p['unit']}", confidence, f"opt-{body.patient_id}")
+        best["predicted"], f"[{lo}–{hi}] {p['unit']}", confidence, f"opt-{body.patient_id}",
+        combination=combination)
 
     return {
         "drug": {"id": drug["id"], "name": drug["name"], "unit": drug["unit"],
@@ -393,7 +480,8 @@ async def optimise(body: OptimiseInput, user: dict = Depends(get_current_user)):
                  "contraindications": drug["contraindications"]},
         "target": target, "target_label": p["label"], "unit": p["unit"], "band": band,
         "baseline_value": round(current, 2), "recommended_dose": best["dose"],
-        "predicted_value": best["predicted"], "achieves_target": not exceeds_max,
+        "predicted_value": best["predicted"], "achieves_target": achieves,
+        "combination": combination,
         "confidence": confidence, "rationale": rationale, "trajectory": trajectory,
     }
 
@@ -427,6 +515,128 @@ async def save_case(body: SaveCaseInput, user: dict = Depends(get_current_user))
 async def patient_cases(pid: str, user: dict = Depends(get_current_user)):
     docs = await db.cases.find({"patient_id": pid}, {"_id": 0}).sort("created_at", -1).to_list(100)
     return docs
+
+
+# ---------------- Virtual clinical trial (cohort of synthetic twins) ----------------
+@api.post("/trial/run")
+async def trial_run(body: TrialInput, user: dict = Depends(get_current_user)):
+    drug = catalog.DRUG_BY_ID.get(body.drug_id)
+    if not drug:
+        raise HTTPException(status_code=404, detail="Drug not found")
+    p = catalog.PARAMETERS[drug["target_param"]]
+    band = p.get(body.threshold, p["standard"])
+    lo, hi = band
+    size = max(10, min(500, body.cohort_size))
+    cohort = catalog.generate_cohort(drug, size, seed=body.seed)
+
+    # dose sweep
+    doses = []
+    d = drug["min_dose"]
+    while d <= drug["max_dose"] + 1e-6:
+        doses.append(round(d, 3))
+        d += drug["step"]
+
+    def dist(v):
+        return max(0.0, v - hi) + max(0.0, lo - v)
+
+    dose_summary = []
+    for dose in doses:
+        in_range = 0
+        side_fx = 0
+        responders = 0
+        preds = []
+        for tw in cohort:
+            base_val = tw["parameters"][drug["target_param"]]
+            pred = catalog.predict_param_after_drug(tw["parameters"], drug, dose)
+            preds.append(pred)
+            if lo <= pred <= hi:
+                in_range += 1
+            d0 = dist(base_val)
+            if d0 > 0 and (d0 - dist(pred)) / d0 >= 0.25:
+                responders += 1
+            if catalog.side_effect_flag(drug, dose, pred, tw["susceptibility"]):
+                side_fx += 1
+        dose_summary.append({
+            "dose": dose,
+            "pct_in_range": round(100 * in_range / size, 1),
+            "pct_responder": round(100 * responders / size, 1),
+            "pct_side_effect": round(100 * side_fx / size, 1),
+            "mean_predicted": round(sum(preds) / size, 1),
+        })
+
+    # best population dose = balance efficacy (in-range + partial response) vs side-effects
+    best = max(dose_summary,
+               key=lambda x: x["pct_in_range"] + 0.5 * x["pct_responder"] - 0.7 * x["pct_side_effect"])
+
+    # per-twin breakdown at best dose
+    breakdown = {"improved": 0, "in_range": 0, "side_effect": 0, "no_change": 0}
+    twins = []
+    for tw in cohort:
+        base_val = tw["parameters"][drug["target_param"]]
+        pred = catalog.predict_param_after_drug(tw["parameters"], drug, best["dose"])
+        inr = lo <= pred <= hi
+        sfx = catalog.side_effect_flag(drug, best["dose"], pred, tw["susceptibility"])
+        moved = abs(pred - base_val) > 0.02 * max(1, abs(base_val))
+        if inr:
+            breakdown["in_range"] += 1
+        if sfx:
+            breakdown["side_effect"] += 1
+        if moved and not inr:
+            breakdown["improved"] += 1
+        if not moved:
+            breakdown["no_change"] += 1
+        twins.append({"id": tw["id"], "baseline": round(base_val, 1),
+                      "predicted": round(pred, 1), "in_range": inr, "side_effect": sfx})
+
+    summary_text = await llm_service.trial_summary(
+        drug["name"], size, best, band, p["unit"], breakdown, f"trial-{body.drug_id}")
+
+    return {
+        "drug": {"id": drug["id"], "name": drug["name"], "unit": drug["unit"]},
+        "target_label": p["label"], "unit": p["unit"], "band": band, "cohort_size": size,
+        "dose_summary": dose_summary, "best_dose": best,
+        "breakdown": breakdown, "twins": twins, "summary": summary_text,
+    }
+
+
+# ---------------- Live sensor stream (SSE) ----------------
+@api.get("/sensor/stream/{pid}")
+async def sensor_stream(pid: str, seconds: int = 40):
+    """Simulated wearable/sweat-sensor feed. Sweat glucose is NOT read directly;
+    sensor signals (lactate, cortisol, HR) update the model which predicts glucose."""
+    patient = await db.patients.find_one({"id": pid}, {"_id": 0})
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    twin = catalog.derive_twin_params(patient["parameters"], patient.get("weight_kg", 70))
+
+    async def gen():
+        import math as _m
+        base_g = twin["basal_glucose"]
+        hr0 = float(patient["parameters"].get("heart_rate", 74))
+        spo20 = float(patient["parameters"].get("spo2", 98))
+        for t in range(int(seconds) * 2):  # 0.5s cadence
+            phase = t / 6.0
+            lactate = round(1.2 + 0.4 * _m.sin(phase) + random.uniform(-0.1, 0.1), 2)
+            cortisol = round(12 + 3 * _m.sin(phase / 3) + random.uniform(-0.6, 0.6), 1)
+            sodium = round(38 + 2 * _m.sin(phase / 2) + random.uniform(-0.5, 0.5), 1)
+            hr = round(hr0 + 6 * _m.sin(phase / 2) + random.uniform(-2, 2), 0)
+            spo2 = round(min(100, spo20 + random.uniform(-0.6, 0.4)), 1)
+            # model updates its glucose PREDICTION from sensor-driven parameters
+            stress = (cortisol - 12) / 12.0
+            pred_glucose = round(base_g + 18 * stress + 3 * (lactate - 1.2)
+                                 + random.uniform(-2, 2), 1)
+            payload = {
+                "t": t * 0.5,
+                "sensor": {"lactate": lactate, "cortisol": cortisol, "sodium": sodium,
+                           "heart_rate": hr, "spo2": spo2},
+                "model_glucose": pred_glucose,
+            }
+            yield f"data: {json.dumps(payload)}\n\n"
+            await asyncio.sleep(0.5)
+        yield f"data: {json.dumps({'done': True})}\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 app.include_router(api)

@@ -37,21 +37,38 @@ async def _ask(prompt: str, session_id: str) -> str:
 
 
 async def dose_rationale(patient_name, drug, dose, target_label, baseline, predicted,
-                         target_band, confidence, session_id):
+                         target_band, confidence, session_id, combination=None):
+    combo_txt = ""
+    if combination:
+        s = combination["secondary"]
+        combo_txt = (
+            f"\nSingle-agent {drug['name']} alone cannot reach the band, so the twin proposes "
+            f"COMBINATION therapy: {drug['name']} {combination['primary']['dose']} {drug['unit']} "
+            f"+ {s['name']} {s['dose']} {s['unit']}, predicted {target_label} "
+            f"{combination['predicted_value']}. Second-agent caution: {s['side_effects']}"
+        )
     prompt = (
         f"Patient: {patient_name}. The mechanistic twin searched the dose space for "
         f"{drug['name']} to bring {target_label} into its reference band {target_band}.\n"
-        f"Baseline {target_label}: {baseline}. Recommended dose: {dose} {drug['unit']}. "
-        f"Predicted {target_label} after treatment: {predicted}. "
-        f"Model confidence: {int(confidence * 100)}%.\n"
+        f"Baseline {target_label}: {baseline}. Recommended single dose: {dose} {drug['unit']}. "
+        f"Predicted {target_label} after single-agent treatment: {predicted}. "
+        f"Model confidence: {int(confidence * 100)}%.{combo_txt}\n"
         f"Known side-effects: {drug['side_effects']} Contraindications: {drug['contraindications']}.\n"
-        "Write a concise clinical rationale (2-3 sentences) for why this dose is proposed, "
-        "note the key safety caveat, and remind that the doctor confirms. Do not invent any numbers."
+        "Write a concise clinical rationale (2-4 sentences) for the proposed regimen"
+        + (" (explain why the combination is needed)" if combination else "")
+        + ", note the key safety caveat, and remind that the doctor confirms. "
+        "Do not invent any numbers."
     )
     try:
         return await _ask(prompt, session_id)
     except Exception as e:
         logger.warning(f"LLM dose_rationale fallback: {e}")
+        if combination:
+            s = combination["secondary"]
+            return (f"{drug['name']} alone plateaus outside the band, so the twin adds {s['name']} "
+                    f"{s['dose']} {s['unit']}: the combination is predicted to reach "
+                    f"{combination['predicted_value']} within {target_band}. Watch for {s['side_effects']} "
+                    "Decision support — confirm before prescribing.")
         return (
             f"The twin predicts {dose} {drug['unit']} of {drug['name']} moves {target_label} "
             f"from {baseline} toward {predicted}, within the target band {target_band}. "
@@ -75,6 +92,25 @@ async def disease_scan_summary(patient_name, flags, session_id):
         top = flags[0]
         return (f"Most likely: {top['name']} ({int(top['confidence']*100)}%), supported by "
                 f"{', '.join(top['evidence'])}. Corroborate with confirmatory testing. Decision support only.")
+
+
+async def trial_summary(drug_name, size, best, band, unit, breakdown, session_id):
+    prompt = (
+        f"A virtual clinical trial ran {drug_name} across {size} synthetic twins. "
+        f"Target reference band: {band[0]}–{band[1]} {unit}. The best population dose was "
+        f"{best['dose']} with {best['pct_in_range']}% of twins reaching the band and "
+        f"{best['pct_side_effect']}% flagged for side-effects (mean predicted {best['mean_predicted']}). "
+        f"At that dose: {breakdown['in_range']} in range, {breakdown['improved']} improved but not in range, "
+        f"{breakdown['side_effect']} with side-effect risk. Summarise the population response in 2-3 "
+        "sentences and state the recommended population dose. Do not invent numbers."
+    )
+    try:
+        return await _ask(prompt, session_id)
+    except Exception as e:
+        logger.warning(f"LLM trial_summary fallback: {e}")
+        return (f"Across {size} twins, {drug_name} at {best['dose']} brought {best['pct_in_range']}% "
+                f"into the {band[0]}–{band[1]} {unit} band with {best['pct_side_effect']}% side-effect "
+                "risk — the recommended population dose. Decision support only.")
 
 
 async def case_summary(patient, out_of_range, tried, session_id):

@@ -4,7 +4,10 @@ These tables GATE what the twin can map: a parameter is only simulated if it
 appears in PARAMETERS with a cited-style reference band.
 """
 import math
+import random
 import uuid
+
+import twin_engine
 
 # ---------------------------------------------------------------------------
 # Reference ranges (standard adult + South-Asian tighter metabolic thresholds)
@@ -75,31 +78,46 @@ DISEASE_BY_ID = {d["id"]: d for d in DISEASES}
 # ---------------------------------------------------------------------------
 DRUGS = [
     {"id": "metformin", "name": "Metformin", "treats": "t2dm", "system": "metabolic",
-     "target_param": "fasting_glucose", "unit": "mg/day",
+     "target_param": "fasting_glucose", "unit": "mg/day", "line": "first",
+     "combine_with": "empagliflozin",
      "min_dose": 500, "max_dose": 2000, "step": 250, "max_safe": 2550,
-     "response_days": None,  # metabolic -> minute-scale meal response
+     "response_days": None,
      "side_effects": "GI upset & lactic-acidosis risk rise above 2000 mg/day.",
      "contraindications": "eGFR < 30 mL/min."},
+    {"id": "empagliflozin", "name": "Empagliflozin", "treats": "t2dm", "system": "metabolic",
+     "target_param": "fasting_glucose", "unit": "mg/day", "line": "second",
+     "min_dose": 10, "max_dose": 25, "step": 5, "max_safe": 25,
+     "response_days": None, "glucose_drop_max": 38,
+     "side_effects": "Genital mycotic infections; volume depletion; euglycaemic DKA (rare).",
+     "contraindications": "eGFR < 30 mL/min; type 1 diabetes."},
     {"id": "lisinopril", "name": "Lisinopril", "treats": "htn", "system": "cardiovascular",
-     "target_param": "systolic_bp", "unit": "mg/day",
+     "target_param": "systolic_bp", "unit": "mg/day", "line": "first",
+     "combine_with": "amlodipine", "ec50": 2.5, "imax": 0.20,
      "min_dose": 5, "max_dose": 40, "step": 5, "max_safe": 80,
-     "response_days": 14,
+     "response_days": 28,
      "side_effects": "Dry cough; hyperkalaemia and hypotension at high dose.",
      "contraindications": "Pregnancy; bilateral renal artery stenosis."},
+    {"id": "amlodipine", "name": "Amlodipine", "treats": "htn", "system": "cardiovascular",
+     "target_param": "systolic_bp", "unit": "mg/day", "line": "second",
+     "ec50": 1.2, "imax": 0.16,
+     "min_dose": 2.5, "max_dose": 10, "step": 2.5, "max_safe": 10,
+     "response_days": 28,
+     "side_effects": "Peripheral oedema; flushing; reflex tachycardia.",
+     "contraindications": "Severe aortic stenosis; cardiogenic shock."},
     {"id": "ferrous_sulfate", "name": "Ferrous Sulfate", "treats": "ida", "system": "hematologic",
-     "target_param": "hemoglobin", "unit": "mg/day",
+     "target_param": "hemoglobin", "unit": "mg/day", "line": "first",
      "min_dose": 65, "max_dose": 195, "step": 65, "max_safe": 260,
      "response_days": 56,
      "side_effects": "Constipation and nausea at higher elemental-iron doses.",
      "contraindications": "Haemochromatosis; active GI bleed."},
     {"id": "levothyroxine", "name": "Levothyroxine", "treats": "hypothyroid", "system": "endocrine",
-     "target_param": "tsh", "unit": "mcg/day",
+     "target_param": "tsh", "unit": "mcg/day", "line": "first",
      "min_dose": 25, "max_dose": 150, "step": 25, "max_safe": 200,
      "response_days": 42,
      "side_effects": "Over-replacement causes palpitations, tremor, bone loss.",
      "contraindications": "Untreated adrenal insufficiency; acute MI."},
     {"id": "salbutamol", "name": "Salbutamol", "treats": "copd", "system": "respiratory",
-     "target_param": "spo2", "unit": "mcg",
+     "target_param": "spo2", "unit": "mcg", "line": "first", "ic50": 90,
      "min_dose": 100, "max_dose": 400, "step": 100, "max_safe": 800,
      "response_days": 1,
      "side_effects": "Tachycardia and tremor with cumulative dosing.",
@@ -118,22 +136,113 @@ def metformin_metabolic_effect(dose):
     return (-32.0 * frac, 1.0 + 0.65 * frac)
 
 
-def predict_param_after_drug(current_value, drug, dose):
-    """Predicted new steady-state of the drug's target parameter (delta model)."""
-    frac = drug_dose_fraction(drug, dose)
+def empagliflozin_effect(dose):
+    """SGLT2 inhibitor: insulin-independent fasting-glucose offset (renal excretion)."""
+    frac = drug_dose_fraction(DRUG_BY_ID["empagliflozin"], dose)
+    return -DRUG_BY_ID["empagliflozin"]["glucose_drop_max"] * frac
+
+
+def predict_param_after_drug(params, drug, dose):
+    """Predicted new steady-state / peak of the drug's target parameter.
+
+    Numbers come from the mechanistic engine where one exists (glucose,
+    blood pressure, SpO2); delta model otherwise.
+    """
     did = drug["id"]
     if did == "metformin":
         offset, _ = metformin_metabolic_effect(dose)
-        return current_value + offset
-    if did == "lisinopril":
-        return current_value - 28.0 * frac          # systolic drop up to ~28 mmHg
+        return float(params.get("fasting_glucose", 100)) + offset
+    if did == "empagliflozin":
+        return float(params.get("fasting_glucose", 100)) + empagliflozin_effect(dose)
+    if drug["system"] == "cardiovascular":
+        sys0 = float(params.get("systolic_bp", 150))
+        dia0 = float(params.get("diastolic_bp", 92))
+        cv = twin_engine.simulate_cardiovascular(
+            systolic0=sys0, diastolic0=dia0,
+            agents=[{"ec50": drug["ec50"], "dose": dose, "imax": drug["imax"]}])
+        return cv["final_systolic"]
+    if drug["system"] == "respiratory":
+        rp = twin_engine.simulate_respiratory(
+            spo2_0=float(params.get("spo2", 92)),
+            heart_rate0=float(params.get("heart_rate", 80)),
+            drug_ic50=drug["ic50"], dose=dose)
+        return rp["peak_spo2"]
+    # delta model (hematologic / endocrine)
+    frac = drug_dose_fraction(drug, dose)
     if did == "ferrous_sulfate":
-        return current_value + 4.5 * frac            # Hb rise up to ~4.5 g/dL
+        return float(params.get("hemoglobin", 12)) + 4.5 * frac
     if did == "levothyroxine":
-        return max(0.2, current_value - (current_value - 1.5) * (0.85 * frac))
-    if did == "salbutamol":
-        return min(100.0, current_value + 7.0 * frac)  # SpO2 gain
-    return current_value
+        cur = float(params.get("tsh", 4))
+        return max(0.2, cur - (cur - 1.5) * (0.85 * frac))
+    return float(params.get(drug["target_param"], 0))
+
+
+def predict_combination(params, primary, pdose, secondary, sdose):
+    """Predicted target value when a second agent is added to the primary."""
+    if primary["system"] == "metabolic":
+        base = float(params.get("fasting_glucose", 100))
+        off_p, _ = metformin_metabolic_effect(pdose)
+        off_s = empagliflozin_effect(sdose)
+        return base + off_p + off_s
+    if primary["system"] == "cardiovascular":
+        sys0 = float(params.get("systolic_bp", 150))
+        dia0 = float(params.get("diastolic_bp", 92))
+        cv = twin_engine.simulate_cardiovascular(
+            systolic0=sys0, diastolic0=dia0,
+            agents=[{"ec50": primary["ec50"], "dose": pdose, "imax": primary["imax"]},
+                    {"ec50": secondary["ec50"], "dose": sdose, "imax": secondary["imax"]}])
+        return cv["final_systolic"]
+    return predict_param_after_drug(params, primary, pdose)
+
+
+# ---------------------------------------------------------------------------
+# Virtual-trial cohort generation + response classification
+# ---------------------------------------------------------------------------
+def generate_cohort(drug, size, seed=None):
+    """Generate `size` synthetic twins with an out-of-range baseline for the
+    drug's target parameter, varied physiology and per-twin drug susceptibility."""
+    rng = random.Random(seed)
+    tgt = drug["target_param"]
+    cohort = []
+    for i in range(size):
+        base = {
+            "fasting_glucose": 90, "hba1c": 5.2, "systolic_bp": 118, "diastolic_bp": 76,
+            "heart_rate": 74, "spo2": 98, "hemoglobin": 13.5, "tsh": 2.0, "ldl": 95,
+        }
+        if tgt == "fasting_glucose":
+            fg = max(105, min(230, rng.gauss(158, 26)))
+            base["fasting_glucose"] = round(fg, 0)
+            base["hba1c"] = round(5.5 + (fg - 100) / 30.0, 1)
+        elif tgt == "systolic_bp":
+            base["systolic_bp"] = round(max(135, min(185, rng.gauss(156, 11))), 0)
+            base["diastolic_bp"] = round(max(85, min(110, rng.gauss(95, 7))), 0)
+        elif tgt == "spo2":
+            base["spo2"] = round(max(85, min(93, rng.gauss(90, 2.0))), 0)
+            base["heart_rate"] = round(max(75, min(105, rng.gauss(90, 6))), 0)
+        elif tgt == "hemoglobin":
+            base["hemoglobin"] = round(max(7.0, min(11.5, rng.gauss(9.6, 1.0))), 1)
+        elif tgt == "tsh":
+            base["tsh"] = round(max(5.5, min(15, rng.gauss(8.5, 2.0))), 1)
+        cohort.append({
+            "id": i + 1,
+            "parameters": base,
+            "susceptibility": round(rng.gauss(1.0, 0.18), 3),  # side-effect tolerance
+            "weight_kg": round(max(48, min(105, rng.gauss(72, 12))), 0),
+        })
+    return cohort
+
+
+def side_effect_flag(drug, dose, predicted, susceptibility):
+    """Per-twin side-effect flag from dose intensity + overshoot, scaled by tolerance."""
+    frac = drug_dose_fraction(drug, dose)
+    thresh = 0.72 * susceptibility          # high-dose intolerance threshold
+    if frac > thresh:
+        return True
+    if drug["target_param"] == "systolic_bp" and predicted < 108 - (susceptibility - 1) * 6:
+        return True                          # hypotension overshoot
+    if drug["target_param"] == "spo2" and frac > 0.6 * susceptibility:
+        return True                          # tachycardia at cumulative dosing
+    return False
 
 
 # ---------------------------------------------------------------------------
