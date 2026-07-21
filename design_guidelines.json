@@ -1,0 +1,107 @@
+{
+  "theme_strategy": {
+    "mode": "hybrid",
+    "rationale": "Medical-imaging-workstation feel as requested. Center uses a dark 'imaging stage' for contrast with 3D medical visuals, flanked by warm, off-white panels for high legibility of clinical data."
+  },
+  "typography": {
+    "headings": {
+      "family": "IBM Plex Sans",
+      "weights": ["400", "500", "600"],
+      "tracking": "tracking-tight"
+    },
+    "body": {
+      "family": "IBM Plex Sans",
+      "weights": ["400", "500"],
+      "tracking": "tracking-normal"
+    },
+    "monospace_data": {
+      "family": "IBM Plex Mono",
+      "weights": ["400", "600"],
+      "tracking": "tracking-widest"
+    },
+    "instructions_to_main_agent": "Never use Inter or generic default sans fonts. Apply IBM Plex Mono to ALL numeric readouts, vital signs, and simulation outputs. Headings should be calm and authoritative. Avoid overly bold or massive typography; precision and hierarchy matter more here."
+  },
+  "colors": {
+    "background": {
+      "stage_dark": "#0A0A0B",
+      "panels_light": "#F8F7F4"
+    },
+    "text": {
+      "on_dark": "#E4E4E7",
+      "on_light": "#1C1C1C",
+      "on_light_muted": "#52525B"
+    },
+    "status": {
+      "in_range_teal": "#0D9488",
+      "alert_amber": "#D97706",
+      "critical_red": "#DC2626"
+    },
+    "body_layers": {
+      "skin": "#E5C8B8",
+      "muscle": "#A63D31",
+      "skeletal": "#F3F2EE",
+      "nervous": "#6B4C9A"
+    },
+    "instructions_to_main_agent": "Ensure maximum contrast. Do NOT use #1B93A4. The central staging area must use stage_dark to make 3D assets and dark-mode charts pop, while side columns must use panels_light with dark text for reading density. Alert colors (Amber/Teal) should be used strictly as signals, not decoration."
+  },
+  "visual_enhancers": {
+    "borders": "1px solid #E5E5E5 on light panels, 1px solid #27272A on the dark stage.",
+    "shadows": "Minimal. Rely on 1px borders for structure. No soft, sprawling shadows.",
+    "surfaces": "Flat Solid. Absolutely NO Glassmorphism. Transparency or blur behind clinical data is dangerous and reduces legibility.",
+    "animations": "Subtle medical/instrumental. Use framer-motion for smooth panel transitions and a gentle breathing/pulse animation on the 3D body or out-of-range metrics."
+  },
+  "grids_and_layouts": {
+    "app_structure": "h-screen w-screen overflow-hidden flex flex-col bg-[#F8F7F4]",
+    "top_bar": "h-16 border-b flex items-center px-4 shrink-0 bg-[#F8F7F4]",
+    "workspace_grid": "flex-1 grid grid-cols-12 gap-0 overflow-hidden",
+    "columns": {
+      "left": "col-span-3 border-r bg-[#F8F7F4] overflow-y-auto p-4 flex flex-col gap-4",
+      "center_stage": "col-span-6 bg-[#0A0A0B] relative flex flex-col items-center justify-center overflow-hidden",
+      "right": "col-span-3 border-l bg-[#F8F7F4] overflow-y-auto p-4 flex flex-col gap-4"
+    },
+    "instructions_to_main_agent": "Follow a strict medical workstation layout. All widgets must snap strictly into the grid with consistent spacing (p-4 or p-6 inside panels). No jagged bottoms."
+  },
+  "components": {
+    "search_bar": "4-mode toggle (Diseases, Physiology links, Patient parameters, Drugs). Use a pill-shaped or cleanly separated segment control for modes.",
+    "data_cards": "Flat, 1px border, bg-white/50 (over the off-white background). Monospace values, right-aligned numbers.",
+    "simulation_chart": "Use Recharts. Bergman model curve: A dark-themed chart placed below the body or over the dark stage, or styled to fit the right panel.",
+    "persistent_banner": "Fixed at the bottom or top absolute, z-50. bg-amber-500 text-black text-xs font-bold uppercase tracking-widest px-4 py-1. Text: 'RESEARCH PROTOTYPE — NOT FOR CLINICAL USE. SIMULATIONS ARE ILLUSTRATIVE.'",
+    "ai_optimizer": "Distinct visual treatment in the right column. Include a 'confidence score' bar, rationale text, and 'Apply to Twin' action button."
+  },
+  "3d_libraries_and_motion": {
+    "library": "@react-three/fiber and @react-three/drei",
+    "implementation": "Render a central 3D body inside the 'center_stage'. Use layers/materials that can be toggled to represent skin, muscle, skeleton, and nervous system using the defined body_layers colors. Use point lights and ambient light to make the model visible against the #0A0A0B background. Include a subtle floating or breathing animation on the model.",
+    "charts": "recharts for live glucose/insulin curves."
+  },
+  "accessibility": {
+    "contrast": "Strict APCA and WCAG 2.1 AA compliance. Black/Dark Gray on Off-White is highly legible. White/Light Gray on Obsidian is clear.",
+    "data_testid": "MANDATORY. Add descriptive data-testid attributes to all inputs, buttons, sliders, and critical data points (e.g., 'data-testid=\"btn-test-drug\"', 'data-testid=\"value-glucose-live\"')."
+  },
+  "media_and_icons": {
+    "icon_library": "@phosphor-icons/react (Duotone or Regular for clinical clarity)",
+    "images": [
+      {
+        "category": "abstract_dashboard_background",
+        "url": "https://images.pexels.com/photos/27141316/pexels-photo-27141316.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "description": "Close-up of a digital interface showcasing futuristic graphs and data analytics. Can be used subtly for login screens or empty states."
+      },
+      {
+        "category": "medical_research",
+        "url": "https://images.pexels.com/photos/14829613/pexels-photo-14829613.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "description": "Scientist in dimly lit lab, ideal for the Doctor Login page background."
+      }
+    ],
+    "instructions_to_main_agent": "Use Phosphor icons. Use the provided images for the login/auth flow. Inside the Twin Workspace, do not use decorative photos—rely entirely on the 3D model, charts, and clean UI."
+  },
+  "UNIVERSAL_GUIDELINES_FOR_MAIN_AGENT": [
+    "You tend to converge toward generic, 'on distribution' outputs. Avoid the 'AI slop' aesthetic.",
+    "Do NOT use universal transitions like 'transition: all'.",
+    "Do NOT center align the app container (.App { text-align: center; }).",
+    "NEVER use AI assistant Emoji characters (🤖🧠💭💡) for icons.",
+    "Ensure the central stage is deeply immersive (dark) while the side panels are highly clinical (warm off-white).",
+    "Prioritize optical alignment and F-pattern readability for data-heavy sections.",
+    "For toasts/notifications, use Sonner.",
+    "All numerical parameters (vitals, doses, labs) MUST use monospace fonts.",
+    "Use color exclusively to convey meaning (Teal = Normal/Live, Amber = Out of Range). Do not use these colors for general buttons or branding."
+  ]
+}
