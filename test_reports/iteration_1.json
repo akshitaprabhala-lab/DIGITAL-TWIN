@@ -1,0 +1,59 @@
+{
+  "summary": "Full end-to-end test of TwinMed Phase-1+2. Backend pytest suite (17 tests, 100% pass) covers auth (register/login/me/logout, seed doctor), catalog, patients CRUD, analyse (standard vs south_asian), disease-scan, simulate (Bergman/metformin lowers peak), optimise (Claude rationale non-empty), case-summary + save-case + patient cases. Frontend Playwright walk-through covers login -> Home (3 seed patients) -> search filter -> Workspace (Anaya) with 3D twin canvas, reference panel (9 params), amber-glow out-of-range organ, South-Asian toggle, layer switch (skin/muscle/skeletal/nervous), Drugs mode (Metformin) -> Simulate (chart populated) -> AI optimise (Claude rationale ~1237 chars) -> AI disease scan (LLM summary in analysis strip) -> save-case -> Report (Claude case summary, 991 chars, Print button present) -> Diseases mode / Parameters edit dialog. New patient intake also verified end-to-end. All data-testids present and stable. One real UI bug found in DoseOptimiser rec card unit.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "DoseOptimiser.jsx (rec-dose display)",
+        "issue": "Recommended dose renders parameter unit instead of drug dose unit — e.g. shows '2000 mg/dL' for metformin instead of '2000 mg/day'. Code uses {rec.recommended_dose} {rec.unit} but rec.unit is the target parameter's unit (from PARAMETERS[target]['unit']). Should be {rec.drug.unit}.",
+        "selector": "[data-testid=\"rec-dose\"]",
+        "priority": "HIGH"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "Workspace edit-params Dialog",
+        "issues": ["A11y console warning: Missing `Description` or `aria-describedby={undefined}` for DialogContent (add DialogDescription or aria-describedby to the Edit patient parameters dialog)."]
+      },
+      {
+        "screen": "SimChart initial paint",
+        "issues": ["Recharts console warning 'width(-1) height(-1)' on first mount of the sim chart (container has -1 dims until it finishes layout). Chart eventually renders but warning is noisy; set minWidth/minHeight or defer render until wrap has size."]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Fix DoseOptimiser recommended-dose unit: replace {rec.unit} with {rec.drug.unit} (or expose drug.unit from /optimise response and use it) so metformin shows 'mg/day' not 'mg/dL'.",
+    "Add DialogDescription (or aria-describedby) to the Edit patient parameters dialog to remove Radix a11y warning.",
+    "Silence Recharts width/height(-1) warning by giving the ResponsiveContainer wrapper an explicit size or gating render until layout has settled."
+  ],
+  "critical_code_review_comments": [
+    "server.py returns full user doc in /auth/me correctly (password_hash excluded, _id excluded) — good.",
+    "JWT secret is loaded from env — good. Cookies set with secure=False for local preview (expected in this env).",
+    "Optimise endpoint response: 'unit' key is the parameter unit; frontend also needs drug.unit for the dose readout. Consider renaming param unit to 'target_unit' to avoid the ambiguity that caused the UI bug.",
+    "seed_patients() generates a new uuid each call — server.py inserts them only if count == 0, so seed IDs are stable across restarts only until the collection is emptied. Fine for prototype.",
+    "startup admin seed re-hashes password if changed — idempotent. Good.",
+    "Workspace.jsx (312 lines) is close to threshold but still readable; DoseOptimiser and TwinBody3D are appropriately split."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py (new pytest suite, 17 tests)"
+  ],
+  "success_rate": {
+    "backend": "100% (17/17)",
+    "frontend": "100% of tested flows (1 unit-label bug found)"
+  },
+  "test_credentials": "Seeded doctor: doctor@twinmed.app / twinmed123 (from /app/memory/test_credentials.md, matches .env ADMIN_EMAIL/PASSWORD).",
+  "seed_data_creation": "None manually. Backend auto-seeds 3 patients (Anaya/Marcus/Priya) on startup. Test created a TEST_ patient via /api/patients then deleted it (verified 404 after delete). Playwright intake also created TEST_Ravi Kumar and deleted it via UI.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend suite at /app/backend/tests/backend_test.py — reusable regression. Run: pytest /app/backend/tests/backend_test.py -v. LLM calls (Claude Sonnet 4.6) take 5–20s; keep timeouts >=30s. Auth uses Bearer token AND httpOnly cookies, so if a shared requests.Session is used both cookie- and header-based auth will apply — use a fresh session/requests call when testing 'requires auth' 401 responses.",
+  "rca_of_the_issue": "DoseOptimiser rec-dose bug RCA — Repro: login as doctor -> open Anaya -> Drugs mode -> select Metformin -> AI optimise -> observe rec-dose text. It renders '2000 mg/dL' (fasting_glucose unit) because /api/optimise response contains 'unit' = PARAMETERS[target]['unit'] (target parameter's unit) and DoseOptimiser.jsx line 105 uses {rec.unit} for the dose readout. Fix: change to {rec.drug.unit} (drug object is already in the response with drug.unit = 'mg/day')."
+}

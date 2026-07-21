@@ -7,12 +7,22 @@ module.exports = {
   ],
   theme: {
     extend: {
+      fontFamily: {
+        sans: ['IBM Plex Sans', 'system-ui', 'sans-serif'],
+        mono: ['IBM Plex Mono', 'ui-monospace', 'monospace'],
+      },
       borderRadius: {
         lg: 'var(--radius)',
         md: 'calc(var(--radius) - 2px)',
         sm: 'calc(var(--radius) - 4px)'
       },
       colors: {
+        twin: {
+          stage: '#0A0A0B', panel: '#F8F7F4', ink: '#1C1C1C', muted: '#52525B',
+          teal: '#0D9488', amber: '#D97706', red: '#DC2626',
+          line: '#E7E5DF', darkline: '#27272A',
+        },
+        layer: { skin: '#E5C8B8', muscle: '#A63D31', bone: '#F3F2EE', nerve: '#6B4C9A' },
         background: 'hsl(var(--background))',
         foreground: 'hsl(var(--foreground))',
         card: {
