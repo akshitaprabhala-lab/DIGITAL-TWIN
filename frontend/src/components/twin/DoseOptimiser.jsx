@@ -102,7 +102,7 @@ export default function DoseOptimiser({ patientId, drug, threshold, onSim, onRec
             <div className="flex items-baseline justify-between">
               <span className="text-xs text-twin-muted">Recommended dose</span>
               <span data-testid="rec-dose" className="font-mono text-lg font-semibold text-twin-teal">
-                {rec.recommended_dose} {rec.unit}
+                {rec.recommended_dose} {rec.drug.unit}
               </span>
             </div>
             <div className="flex items-baseline justify-between mt-1 font-mono text-xs">

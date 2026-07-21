@@ -13,7 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "@/components/ui/dialog";
 import {
   Home as HomeIcon, Plus, FileText, ScanSearch, Layers, Save, Loader2,
@@ -287,7 +287,9 @@ export default function Workspace() {
       {/* edit params dialog */}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent className="max-w-lg">
-          <DialogHeader><DialogTitle>Edit patient parameters</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle>Edit patient parameters</DialogTitle>
+            <DialogDescription>Adjust vitals & labs — the twin re-baselines on save.</DialogDescription>
+          </DialogHeader>
           <div className="grid grid-cols-2 gap-3 max-h-[50vh] overflow-y-auto thin-scroll pr-1">
             {Object.entries(params).map(([key, p]) => (
               <div key={key}>
