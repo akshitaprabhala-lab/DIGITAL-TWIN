@@ -708,13 +708,14 @@ async def startup():
     elif not verify_password(admin_password, existing["password_hash"]):
         await db.users.update_one({"email": admin_email},
                                   {"$set": {"password_hash": hash_password(admin_password)}})
-    # seed synthetic patients
-    if await db.patients.count_documents({}) == 0:
-        for pt in catalog.seed_patients():
-            pt["twin"] = catalog.derive_twin_params(pt["parameters"], pt.get("weight_kg", 70))
-            pt["created_at"] = datetime.now(timezone.utc).isoformat()
-            await db.patients.insert_one({**pt})
-        logger.info("Seeded synthetic patients")
+    # seed synthetic patients (per-name upsert so accidental deletions self-heal)
+    for pt in catalog.seed_patients():
+        if await db.patients.find_one({"name": pt["name"], "seed": True}):
+            continue
+        pt["twin"] = catalog.derive_twin_params(pt["parameters"], pt.get("weight_kg", 70))
+        pt["created_at"] = datetime.now(timezone.utc).isoformat()
+        await db.patients.insert_one({**pt})
+        logger.info(f"Seeded synthetic patient {pt['name']}")
 
 
 @app.on_event("shutdown")

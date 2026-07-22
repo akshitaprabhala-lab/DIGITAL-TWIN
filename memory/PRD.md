@@ -56,11 +56,24 @@ optimisation (rationale + confidence) → save & report.
   amlodipine 137→125; metformin+empagliflozin). Combination-card in the optimiser UI.
 - Testing iteration_2: backend 27/27, frontend flows 100%, no critical issues.
 
+## Implemented — iteration 3 (2026-07-21)
+- **Mechanistic iron & thyroid models**: `simulate_hematologic` (oral iron → stores →
+  iron-limited erythropoiesis vs RBC turnover; delayed Hb-correction curve, dose-sensitive)
+  and `simulate_endocrine` (HPT-axis; baseline T4 inferred from TSH for self-consistency,
+  sigmoid negative feedback). Ferrous & levothyroxine now use full ODE curves like the others.
+- **Trial History**: every `/api/trial/run` is persisted; `GET /api/trials` (lightweight list)
+  and `GET /api/trials/{id}` (full). `/trials` page shows a history table, opens past trials,
+  and compares 2–4 runs side by side in a grouped bar chart.
+- **Physiology Map**: `PhysiologyMap` interactive SVG pathway graph per organ (organ/mediator/
+  param nodes); clicking a node highlights its downstream pathway and param nodes show the
+  patient's live value/status. Opened from the Physiology-links search mode.
+- Fixed non-idempotent patient seed → now per-name upsert (deleted seeds self-heal on restart).
+- Testing iteration_3: backend 35/35, frontend flows 100%, no bugs.
+
 ## Backlog
-- **P2**: More mechanistic models (renal, hepatic) replacing remaining delta tiers (ferrous, levo).
-- **P2**: Interactive physiology-link graph (node trace) beyond the text popover.
-- **P2**: Real MQTT broker ingestion + short-lived signed token to authenticate the SSE feed.
-- **P2**: Persist trial runs; multi-drug (>2) regimen search; split server.py into routes/ package.
+- **P2**: Multi-tenant scoping of trials/patients by doctor id; server.py → routes/ package split.
+- **P2**: Triple/N-agent combination search; persist & compare individual optimisation cases.
+- **P3**: Real MQTT broker ingestion + signed short-lived token to authenticate the SSE feed.
 
 ## Next tasks
-- Renal/hepatic mechanistic models; persisted/comparative trials; real sensor ingestion.
+- Route package refactor, N-agent combinations, real sensor ingestion.
