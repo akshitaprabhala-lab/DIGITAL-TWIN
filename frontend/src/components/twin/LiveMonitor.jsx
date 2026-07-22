@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { ResponsiveContainer, LineChart, Line, YAxis, XAxis } from "recharts";
 import { Radio, X, Droplets } from "lucide-react";
+import { api } from "@/lib/api";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -8,21 +9,33 @@ export default function LiveMonitor({ patientId, onClose, onReading }) {
   const [reading, setReading] = useState(null);
   const [history, setHistory] = useState([]);
   const [status, setStatus] = useState("connecting");
+  const [source, setSource] = useState(null);
   const esRef = useRef(null);
 
   useEffect(() => {
-    const es = new EventSource(`${API}/sensor/stream/${patientId}?seconds=120`);
-    esRef.current = es;
-    es.onopen = () => setStatus("live");
-    es.onmessage = (e) => {
-      const d = JSON.parse(e.data);
-      if (d.done) { es.close(); setStatus("ended"); return; }
-      setReading(d);
-      setHistory((h) => [...h.slice(-59), { t: d.t, glucose: d.model_glucose, hr: d.sensor.heart_rate }]);
-      onReading && onReading(d);
-    };
-    es.onerror = () => { setStatus("ended"); es.close(); };
-    return () => es.close();
+    let es;
+    let cancelled = false;
+    (async () => {
+      let token;
+      try {
+        const { data } = await api.get(`/sensor/token?patient_id=${patientId}`);
+        token = data.token;
+      } catch (e) { setStatus("ended"); return; }
+      if (cancelled) return;
+      es = new EventSource(`${API}/sensor/stream/${patientId}?token=${token}&seconds=120`);
+      esRef.current = es;
+      es.onopen = () => setStatus("live");
+      es.onmessage = (e) => {
+        const d = JSON.parse(e.data);
+        if (d.done) { es.close(); setStatus("ended"); return; }
+        setSource(d.source);
+        setReading(d);
+        setHistory((h) => [...h.slice(-59), { t: d.t, glucose: d.model_glucose, hr: d.sensor.heart_rate }]);
+        onReading && onReading(d);
+      };
+      es.onerror = () => { setStatus("ended"); es.close(); };
+    })();
+    return () => { cancelled = true; if (es) es.close(); };
   }, [patientId, onReading]);
 
   const s = reading?.sensor;
@@ -39,7 +52,7 @@ export default function LiveMonitor({ patientId, onClose, onReading }) {
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-widest text-twin-teal">
           <Radio className={`h-3.5 w-3.5 ${status === "live" ? "pulse-amber" : ""}`} />
-          Live sensor feed · {status}
+          Live feed · {status}{source ? ` · ${source === "mqtt" ? "MQTT" : "local"}` : ""}
         </div>
         <button data-testid="close-live-monitor" onClick={onClose} className="text-zinc-500 hover:text-zinc-200">
           <X className="h-4 w-4" />

@@ -135,27 +135,26 @@ export default function DoseOptimiser({ patientId, drug, threshold, onSim, onRec
 
           <p className="text-xs leading-relaxed text-twin-ink whitespace-pre-wrap">{rec.rationale}</p>
 
-          {rec.combination && (
-            <div data-testid="combination-card" className="rise bg-twin-amber/5 border border-twin-amber/30 rounded-lg p-3 space-y-1.5">
+          {rec.regimen && (
+            <div data-testid="regimen-card" className="rise bg-twin-amber/5 border border-twin-amber/30 rounded-lg p-3 space-y-1.5">
               <div className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest text-twin-amber">
-                <Layers2 className="h-3 w-3" /> Combination therapy suggested
+                <Layers2 className="h-3 w-3" /> {rec.regimen.level} therapy suggested
               </div>
               <p className="text-[11px] text-twin-muted leading-relaxed">
-                Single-agent {rec.drug.name} plateaus outside the band — add a second-line agent:
+                Single-agent {rec.drug.name} plateaus outside the band — the twin escalates to a
+                {" "}{rec.regimen.agents.length}-drug regimen:
               </p>
               <div className="font-mono text-xs space-y-0.5">
-                <div className="flex justify-between">
-                  <span>{rec.combination.primary.name}</span>
-                  <span className="font-semibold">{rec.combination.primary.dose} {rec.drug.unit}</span>
-                </div>
-                <div className="flex justify-between text-twin-amber">
-                  <span>+ {rec.combination.secondary.name}</span>
-                  <span className="font-semibold">{rec.combination.secondary.dose} {rec.combination.secondary.unit}</span>
-                </div>
+                {rec.regimen.agents.map((a, i) => (
+                  <div key={a.id} className={`flex justify-between ${i > 0 ? "text-twin-amber" : ""}`}>
+                    <span>{i > 0 ? "+ " : ""}{a.name}<span className="text-twin-muted"> · {a.line}</span></span>
+                    <span className="font-semibold">{a.dose} {a.unit}</span>
+                  </div>
+                ))}
                 <div className="flex justify-between border-t border-twin-amber/20 pt-1 mt-1">
-                  <span className="text-twin-muted">combined {rec.target_label}</span>
+                  <span className="text-twin-muted">regimen {rec.target_label}</span>
                   <span className="font-semibold text-twin-teal">
-                    {rec.baseline_value} → {rec.combination.predicted_value}
+                    {rec.baseline_value} → {rec.regimen.predicted_value}
                   </span>
                 </div>
               </div>

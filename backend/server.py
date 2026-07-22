@@ -7,6 +7,7 @@ load_dotenv(ROOT_DIR / ".env")
 import os
 import uuid
 import json
+import math
 import random
 import asyncio
 import logging
@@ -24,6 +25,7 @@ from typing import List, Optional, Dict, Any
 import catalog
 import twin_engine
 import llm_service
+import sensor_mqtt
 
 # --------------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO,
@@ -394,6 +396,54 @@ def build_trajectory(patient, drug, dose, threshold, meal_carbs, secondary=None,
     }
 
 
+def build_regimen_trajectory(patient, regimen, threshold):
+    """Trajectory for a multi-agent regimen (metabolic Bergman / cardiovascular ODE)."""
+    twin = catalog.derive_twin_params(patient["parameters"], patient.get("weight_kg", 70))
+    params = patient["parameters"]
+    primary = regimen[0][0]
+    target = primary["target_param"]
+    p = catalog.PARAMETERS[target]
+    band = p.get(threshold, p["standard"])
+
+    if primary["system"] == "metabolic":
+        base = twin_engine.simulate_glucose(
+            weight_kg=twin["weight_kg"], basal_glucose=twin["basal_glucose"],
+            basal_insulin=twin["basal_insulin"], si_factor=twin["si_factor"],
+            beta_factor=twin["beta_factor"], meal_carbs_g=60)
+        offset, si_boost = 0.0, 1.0
+        for d, dose in regimen:
+            o, sb = catalog.metabolic_agent_effect(d["id"], dose)
+            offset += o
+            si_boost *= sb
+        treated = twin_engine.simulate_glucose(
+            weight_kg=twin["weight_kg"], basal_glucose=twin["basal_glucose"],
+            basal_insulin=twin["basal_insulin"], si_factor=twin["si_factor"],
+            beta_factor=twin["beta_factor"], meal_carbs_g=60,
+            glucose_offset=offset, si_boost=si_boost)
+        series = [{"t": base["times"][i], "baseline": base["glucose"][i],
+                   "treated": treated["glucose"][i]} for i in range(len(base["times"]))]
+        return {"system": "metabolic", "target": target, "target_label": p["label"],
+                "unit": p["unit"], "band": band, "x_label": "minutes", "x_unit": "min",
+                "series": series, "baseline_value": round(twin["basal_glucose"], 1),
+                "predicted_value": round(twin["basal_glucose"] + offset, 1)}
+
+    if primary["system"] == "cardiovascular":
+        sys0 = float(params.get("systolic_bp", 150))
+        dia0 = float(params.get("diastolic_bp", 92))
+        agents = [{"ec50": d["ec50"], "dose": dose, "imax": d["imax"]} for d, dose in regimen]
+        cv = twin_engine.simulate_cardiovascular(systolic0=sys0, diastolic0=dia0, agents=agents)
+        step = max(1, len(cv["times"]) // 60)
+        series = [{"t": cv["times"][i], "baseline": sys0, "treated": cv["systolic"][i],
+                   "diastolic": cv["diastolic"][i]} for i in range(0, len(cv["times"]), step)]
+        return {"system": "cardiovascular", "target": target, "target_label": p["label"],
+                "unit": p["unit"], "band": band, "x_label": "days", "x_unit": "d",
+                "series": series, "baseline_value": round(sys0, 1),
+                "predicted_value": cv["final_systolic"], "final_diastolic": cv["final_diastolic"]}
+
+    d, dose = regimen[0]
+    return build_trajectory(patient, d, dose, threshold, 60)
+
+
 @api.post("/simulate")
 async def simulate(body: SimulateInput, user: dict = Depends(get_current_user)):
     patient = await db.patients.find_one({"id": body.patient_id}, {"_id": 0})
@@ -441,58 +491,66 @@ async def optimise(body: OptimiseInput, user: dict = Depends(get_current_user)):
         best = {"dose": drug["max_dose"], "predicted": round(predicted, 2)}
         exceeds_max = not (lo <= predicted <= hi)
 
-    # combination therapy: single agent can't reach target -> add second-line drug
-    combination = None
-    if exceeds_max and drug.get("combine_with"):
-        secondary = catalog.DRUG_BY_ID.get(drug["combine_with"])
-        sdoses = []
-        sd = secondary["min_dose"]
-        while sd <= secondary["max_dose"] + 1e-6:
-            sdoses.append(round(sd, 3))
-            sd += secondary["step"]
-        combo_best = None
-        for sdose in sdoses:
-            pred = catalog.predict_combination(params, drug, drug["max_dose"], secondary, sdose)
-            if lo <= pred <= hi and combo_best is None:
-                combo_best = {"sdose": sdose, "predicted": round(pred, 2)}
-        if combo_best is None:
-            pred = catalog.predict_combination(params, drug, drug["max_dose"],
-                                               secondary, secondary["max_dose"])
-            combo_best = {"sdose": secondary["max_dose"], "predicted": round(pred, 2)}
-        combo_reaches = lo <= combo_best["predicted"] <= hi
-        combination = {
-            "primary": {"id": drug["id"], "name": drug["name"], "unit": drug["unit"],
-                        "dose": drug["max_dose"]},
-            "secondary": {"id": secondary["id"], "name": secondary["name"],
-                          "unit": secondary["unit"], "dose": combo_best["sdose"],
-                          "side_effects": secondary["side_effects"]},
-            "predicted_value": combo_best["predicted"], "achieves_target": combo_reaches,
+    # escalate: single agent -> combination -> triple therapy along combine_chain
+    def dose_range(dr):
+        out, x = [], dr["min_dose"]
+        while x <= dr["max_dose"] + 1e-6:
+            out.append(round(x, 3))
+            x += dr["step"]
+        return out
+
+    regimen = None            # multi-agent regimen when single agent insufficient
+    if exceeds_max and drug.get("combine_chain"):
+        agents = [(drug, drug["max_dose"])]     # primary at max
+        achieved = False
+        for cid in drug["combine_chain"]:
+            cdrug = catalog.DRUG_BY_ID[cid]
+            picked = None
+            for cdose in dose_range(cdrug):
+                pred = catalog.predict_regimen(params, agents + [(cdrug, cdose)])
+                if lo <= pred <= hi:
+                    picked = cdose
+                    break
+            if picked is not None:
+                agents.append((cdrug, picked))
+                achieved = True
+                break
+            agents.append((cdrug, cdrug["max_dose"]))   # max it out, escalate further
+            if lo <= catalog.predict_regimen(params, agents) <= hi:
+                achieved = True
+                break
+        final_pred = round(catalog.predict_regimen(params, agents), 2)
+        regimen = {
+            "level": "triple" if len(agents) >= 3 else "combination",
+            "agents": [{"id": d["id"], "name": d["name"], "unit": d["unit"], "dose": dose,
+                        "line": d.get("line"), "side_effects": d["side_effects"]}
+                       for d, dose in agents],
+            "predicted_value": final_pred,
+            "achieves_target": lo <= final_pred <= hi,
         }
 
     # confidence
-    ref_pred = combination["predicted_value"] if combination else best["predicted"]
+    ref_pred = regimen["predicted_value"] if regimen else best["predicted"]
     margin = 0.0
     if hi > lo:
         centred = 1.0 - abs((ref_pred - (lo + hi) / 2) / ((hi - lo) / 2))
         margin = max(0.0, min(1.0, centred))
-    dose_penalty = 0.15 if best["dose"] >= drug["max_dose"] and not combination else 0.0
-    achieves = (combination["achieves_target"] if combination else not exceeds_max)
+    dose_penalty = 0.15 if best["dose"] >= drug["max_dose"] and not regimen else 0.0
+    achieves = (regimen["achieves_target"] if regimen else not exceeds_max)
     confidence = round(max(0.35, min(0.95, 0.55 + 0.4 * margin - dose_penalty)), 2)
     if not achieves:
         confidence = round(min(confidence, 0.45), 2)
 
-    # trajectory: combination if present, else single
-    if combination:
-        secondary = catalog.DRUG_BY_ID[drug["combine_with"]]
-        trajectory = build_trajectory(patient, drug, drug["max_dose"], body.threshold, 60,
-                                      secondary=secondary, sdose=combination["secondary"]["dose"])
+    if regimen:
+        reg_pairs = [(catalog.DRUG_BY_ID[a["id"]], a["dose"]) for a in regimen["agents"]]
+        trajectory = build_regimen_trajectory(patient, reg_pairs, body.threshold)
     else:
         trajectory = build_trajectory(patient, drug, best["dose"], body.threshold, 60)
 
     rationale = await llm_service.dose_rationale(
         patient["name"], drug, best["dose"], p["label"], round(current, 2),
         best["predicted"], f"[{lo}–{hi}] {p['unit']}", confidence, f"opt-{body.patient_id}",
-        combination=combination)
+        regimen=regimen)
 
     return {
         "drug": {"id": drug["id"], "name": drug["name"], "unit": drug["unit"],
@@ -501,7 +559,7 @@ async def optimise(body: OptimiseInput, user: dict = Depends(get_current_user)):
         "target": target, "target_label": p["label"], "unit": p["unit"], "band": band,
         "baseline_value": round(current, 2), "recommended_dose": best["dose"],
         "predicted_value": best["predicted"], "achieves_target": achieves,
-        "combination": combination,
+        "regimen": regimen,
         "confidence": confidence, "rationale": rationale, "trajectory": trajectory,
     }
 
@@ -617,6 +675,7 @@ async def trial_run(body: TrialInput, user: dict = Depends(get_current_user)):
         "target_label": p["label"], "unit": p["unit"], "band": band, "cohort_size": size,
         "threshold": body.threshold, "dose_summary": dose_summary, "best_dose": best,
         "breakdown": breakdown, "twins": twins, "summary": summary_text,
+        "label": "", "notes": "", "tags": [],
         "doctor_id": user["id"], "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.trials.insert_one({**result})
@@ -625,11 +684,18 @@ async def trial_run(body: TrialInput, user: dict = Depends(get_current_user)):
 
 
 @api.get("/trials")
-async def list_trials(user: dict = Depends(get_current_user)):
+async def list_trials(tag: Optional[str] = None, user: dict = Depends(get_current_user)):
+    query = {"tags": tag} if tag else {}
     docs = await db.trials.find(
-        {}, {"_id": 0, "twins": 0, "dose_summary": 0}
+        query, {"_id": 0, "twins": 0, "dose_summary": 0}
     ).sort("created_at", -1).to_list(100)
     return docs
+
+
+@api.get("/trials/tags")
+async def trial_tags(user: dict = Depends(get_current_user)):
+    tags = await db.trials.distinct("tags")
+    return {"tags": [t for t in tags if t]}
 
 
 @api.get("/trials/{tid}")
@@ -640,36 +706,77 @@ async def get_trial(tid: str, user: dict = Depends(get_current_user)):
     return doc
 
 
-# ---------------- Live sensor stream (SSE) ----------------
+@api.patch("/trials/{tid}")
+async def update_trial(tid: str, body: TrialNotesInput, user: dict = Depends(get_current_user)):
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    res = await db.trials.update_one({"id": tid}, {"$set": updates})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Trial not found")
+    return await db.trials.find_one({"id": tid}, {"_id": 0, "twins": 0, "dose_summary": 0})
+
+
+# ---------------- Live sensor stream (MQTT-backed SSE + short-lived token) ----------------
+def create_sensor_token(uid, pid):
+    payload = {"sub": uid, "pid": pid, "type": "sensor",
+               "exp": datetime.now(timezone.utc) + timedelta(seconds=90)}
+    return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+
+
+@api.get("/sensor/token")
+async def sensor_token(patient_id: str, user: dict = Depends(get_current_user)):
+    patient = await db.patients.find_one({"id": patient_id}, {"_id": 0})
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    return {"token": create_sensor_token(user["id"], patient_id),
+            "mqtt_connected": sensor_mqtt.is_connected()}
+
+
 @api.get("/sensor/stream/{pid}")
-async def sensor_stream(pid: str, seconds: int = 40):
-    """Simulated wearable/sweat-sensor feed. Sweat glucose is NOT read directly;
-    sensor signals (lactate, cortisol, HR) update the model which predicts glucose."""
+async def sensor_stream(pid: str, token: str, seconds: int = 60):
+    """Secure SSE feed. Requires a short-lived sensor token (query param, since
+    EventSource cannot send headers). Streams the MQTT-ingested wearable signals;
+    sweat glucose is NOT read directly — the twin predicts glucose from the
+    sensor-driven parameters. Falls back to synthetic signals if MQTT is down."""
+    try:
+        payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "sensor" or payload.get("pid") != pid:
+            raise HTTPException(status_code=401, detail="Invalid sensor token")
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Sensor token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid sensor token")
+
     patient = await db.patients.find_one({"id": pid}, {"_id": 0})
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
     twin = catalog.derive_twin_params(patient["parameters"], patient.get("weight_kg", 70))
 
     async def gen():
-        import math as _m
         base_g = twin["basal_glucose"]
         hr0 = float(patient["parameters"].get("heart_rate", 74))
         spo20 = float(patient["parameters"].get("spo2", 98))
-        for t in range(int(seconds) * 2):  # 0.5s cadence
-            phase = t / 6.0
-            lactate = round(1.2 + 0.4 * _m.sin(phase) + random.uniform(-0.1, 0.1), 2)
-            cortisol = round(12 + 3 * _m.sin(phase / 3) + random.uniform(-0.6, 0.6), 1)
-            sodium = round(38 + 2 * _m.sin(phase / 2) + random.uniform(-0.5, 0.5), 1)
-            hr = round(hr0 + 6 * _m.sin(phase / 2) + random.uniform(-2, 2), 0)
-            spo2 = round(min(100, spo20 + random.uniform(-0.6, 0.4)), 1)
+        for t in range(int(seconds) * 2):
+            src = "mqtt"
+            raw = sensor_mqtt.get_latest() if sensor_mqtt.is_connected() else None
+            if raw is None:                       # fallback synthetic
+                src = "local"
+                ph = t / 6.0
+                raw = {
+                    "lactate": round(1.2 + 0.4 * math.sin(ph) + random.uniform(-0.1, 0.1), 2),
+                    "cortisol": round(12 + 3 * math.sin(ph / 3) + random.uniform(-0.6, 0.6), 1),
+                    "sodium": round(38 + 2 * math.sin(ph / 2) + random.uniform(-0.5, 0.5), 1),
+                    "heart_rate": round(hr0 + 6 * math.sin(ph / 2) + random.uniform(-2, 2), 0),
+                    "spo2": round(min(100, spo20 + random.uniform(-0.6, 0.4)), 1),
+                }
             # model updates its glucose PREDICTION from sensor-driven parameters
-            stress = (cortisol - 12) / 12.0
-            pred_glucose = round(base_g + 18 * stress + 3 * (lactate - 1.2)
+            stress = (raw["cortisol"] - 12) / 12.0
+            pred_glucose = round(base_g + 18 * stress + 3 * (raw["lactate"] - 1.2)
                                  + random.uniform(-2, 2), 1)
             payload = {
-                "t": t * 0.5,
-                "sensor": {"lactate": lactate, "cortisol": cortisol, "sodium": sodium,
-                           "heart_rate": hr, "spo2": spo2},
+                "t": t * 0.5, "source": src,
+                "sensor": {"lactate": raw["lactate"], "cortisol": raw["cortisol"],
+                           "sodium": raw["sodium"], "heart_rate": raw["heart_rate"],
+                           "spo2": raw["spo2"]},
                 "model_glucose": pred_glucose,
             }
             yield f"data: {json.dumps(payload)}\n\n"
@@ -693,6 +800,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup():
+    sensor_mqtt.start()
     await db.users.create_index("email", unique=True)
     await db.patients.create_index("id", unique=True)
     # seed admin doctor

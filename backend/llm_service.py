@@ -37,15 +37,15 @@ async def _ask(prompt: str, session_id: str) -> str:
 
 
 async def dose_rationale(patient_name, drug, dose, target_label, baseline, predicted,
-                         target_band, confidence, session_id, combination=None):
+                         target_band, confidence, session_id, regimen=None):
     combo_txt = ""
-    if combination:
-        s = combination["secondary"]
+    if regimen:
+        agents_txt = " + ".join(f"{a['name']} {a['dose']} {a['unit']}" for a in regimen["agents"])
         combo_txt = (
             f"\nSingle-agent {drug['name']} alone cannot reach the band, so the twin proposes "
-            f"COMBINATION therapy: {drug['name']} {combination['primary']['dose']} {drug['unit']} "
-            f"+ {s['name']} {s['dose']} {s['unit']}, predicted {target_label} "
-            f"{combination['predicted_value']}. Second-agent caution: {s['side_effects']}"
+            f"{regimen['level'].upper()} therapy: {agents_txt}, predicted {target_label} "
+            f"{regimen['predicted_value']}. Caution on added agents: "
+            + "; ".join(a["side_effects"] for a in regimen["agents"][1:])
         )
     prompt = (
         f"Patient: {patient_name}. The mechanistic twin searched the dose space for "
@@ -55,7 +55,7 @@ async def dose_rationale(patient_name, drug, dose, target_label, baseline, predi
         f"Model confidence: {int(confidence * 100)}%.{combo_txt}\n"
         f"Known side-effects: {drug['side_effects']} Contraindications: {drug['contraindications']}.\n"
         "Write a concise clinical rationale (2-4 sentences) for the proposed regimen"
-        + (" (explain why the combination is needed)" if combination else "")
+        + (" (explain why each added agent is needed)" if regimen else "")
         + ", note the key safety caveat, and remind that the doctor confirms. "
         "Do not invent any numbers."
     )
@@ -63,12 +63,12 @@ async def dose_rationale(patient_name, drug, dose, target_label, baseline, predi
         return await _ask(prompt, session_id)
     except Exception as e:
         logger.warning(f"LLM dose_rationale fallback: {e}")
-        if combination:
-            s = combination["secondary"]
-            return (f"{drug['name']} alone plateaus outside the band, so the twin adds {s['name']} "
-                    f"{s['dose']} {s['unit']}: the combination is predicted to reach "
-                    f"{combination['predicted_value']} within {target_band}. Watch for {s['side_effects']} "
-                    "Decision support — confirm before prescribing.")
+        if regimen:
+            agents_txt = " + ".join(f"{a['name']} {a['dose']} {a['unit']}" for a in regimen["agents"])
+            return (f"{drug['name']} alone plateaus outside the band, so the twin escalates to "
+                    f"{regimen['level']} therapy ({agents_txt}), predicted to reach "
+                    f"{regimen['predicted_value']} within {target_band}. Monitor the added agents' "
+                    "side-effects. Decision support — confirm before prescribing.")
         return (
             f"The twin predicts {dose} {drug['unit']} of {drug['name']} moves {target_label} "
             f"from {baseline} toward {predicted}, within the target band {target_band}. "

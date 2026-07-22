@@ -79,7 +79,7 @@ DISEASE_BY_ID = {d["id"]: d for d in DISEASES}
 DRUGS = [
     {"id": "metformin", "name": "Metformin", "treats": "t2dm", "system": "metabolic",
      "target_param": "fasting_glucose", "unit": "mg/day", "line": "first",
-     "combine_with": "empagliflozin",
+     "combine_with": "empagliflozin", "combine_chain": ["empagliflozin", "gliclazide"],
      "min_dose": 500, "max_dose": 2000, "step": 250, "max_safe": 2550,
      "response_days": None,
      "side_effects": "GI upset & lactic-acidosis risk rise above 2000 mg/day.",
@@ -90,9 +90,16 @@ DRUGS = [
      "response_days": None, "glucose_drop_max": 38,
      "side_effects": "Genital mycotic infections; volume depletion; euglycaemic DKA (rare).",
      "contraindications": "eGFR < 30 mL/min; type 1 diabetes."},
+    {"id": "gliclazide", "name": "Gliclazide", "treats": "t2dm", "system": "metabolic",
+     "target_param": "fasting_glucose", "unit": "mg/day", "line": "third",
+     "min_dose": 40, "max_dose": 160, "step": 40, "max_safe": 320,
+     "response_days": None, "glucose_drop_max": 34,
+     "side_effects": "Hypoglycaemia and weight gain (insulin secretagogue).",
+     "contraindications": "Severe renal/hepatic impairment; type 1 diabetes."},
     {"id": "lisinopril", "name": "Lisinopril", "treats": "htn", "system": "cardiovascular",
      "target_param": "systolic_bp", "unit": "mg/day", "line": "first",
-     "combine_with": "amlodipine", "ec50": 2.5, "imax": 0.20,
+     "combine_with": "amlodipine", "combine_chain": ["amlodipine", "hydrochlorothiazide"],
+     "ec50": 2.5, "imax": 0.20,
      "min_dose": 5, "max_dose": 40, "step": 5, "max_safe": 80,
      "response_days": 28,
      "side_effects": "Dry cough; hyperkalaemia and hypotension at high dose.",
@@ -104,6 +111,13 @@ DRUGS = [
      "response_days": 28,
      "side_effects": "Peripheral oedema; flushing; reflex tachycardia.",
      "contraindications": "Severe aortic stenosis; cardiogenic shock."},
+    {"id": "hydrochlorothiazide", "name": "Hydrochlorothiazide", "treats": "htn",
+     "system": "cardiovascular", "target_param": "systolic_bp", "unit": "mg/day", "line": "third",
+     "ec50": 1.5, "imax": 0.13,
+     "min_dose": 12.5, "max_dose": 50, "step": 12.5, "max_safe": 50,
+     "response_days": 28,
+     "side_effects": "Hypokalaemia, hyponatraemia, hyperuricaemia (gout).",
+     "contraindications": "Anuria; severe hyponatraemia; sulfonamide allergy."},
     {"id": "ferrous_sulfate", "name": "Ferrous Sulfate", "treats": "ida", "system": "hematologic",
      "target_param": "hemoglobin", "unit": "mg/day", "line": "first",
      "min_dose": 65, "max_dose": 195, "step": 65, "max_safe": 260,
@@ -140,6 +154,32 @@ def empagliflozin_effect(dose):
     """SGLT2 inhibitor: insulin-independent fasting-glucose offset (renal excretion)."""
     frac = drug_dose_fraction(DRUG_BY_ID["empagliflozin"], dose)
     return -DRUG_BY_ID["empagliflozin"]["glucose_drop_max"] * frac
+
+
+def metabolic_agent_effect(drug_id, dose):
+    """Return (glucose_offset, si_boost) for any metabolic agent."""
+    if drug_id == "metformin":
+        return metformin_metabolic_effect(dose)
+    drug = DRUG_BY_ID[drug_id]
+    frac = drug_dose_fraction(drug, dose)
+    return (-drug.get("glucose_drop_max", 0) * frac, 1.0)
+
+
+def predict_regimen(params, regimen):
+    """Predicted target value for a multi-agent regimen [(drug, dose), ...]."""
+    primary = regimen[0][0]
+    if primary["system"] == "metabolic":
+        base = float(params.get("fasting_glucose", 100))
+        offset = sum(metabolic_agent_effect(d["id"], dose)[0] for d, dose in regimen)
+        return base + offset
+    if primary["system"] == "cardiovascular":
+        sys0 = float(params.get("systolic_bp", 150))
+        dia0 = float(params.get("diastolic_bp", 92))
+        agents = [{"ec50": d["ec50"], "dose": dose, "imax": d["imax"]} for d, dose in regimen]
+        return twin_engine.simulate_cardiovascular(
+            systolic0=sys0, diastolic0=dia0, agents=agents)["final_systolic"]
+    d, dose = regimen[0]
+    return predict_param_after_drug(params, d, dose)
 
 
 def predict_param_after_drug(params, drug, dose):
