@@ -33,27 +33,34 @@ optimisation (rationale + confidence) → save & report.
 
 ## Implemented (2026-07-21)
 - Auth: register/login/logout/me; seeded doctor `doctor@twinmed.app / twinmed123`.
-- Home patient list (cards + search) + New patient; 3 synthetic patients auto-seeded.
-- Intake form (demographics, vitals, labs, history, meds, known conditions) → twin baseline.
-- Twin Workspace: dark 3D imaging stage (layer switch skin/muscle/skeletal/nervous,
-  clickable regions, amber-glow out-of-range organs, breathing/heartbeat), left
-  Reference-range panel with South-Asian toggle, right Current stats + live vitals,
-  four-mode top search bar (Diseases / Physiology links / Parameters / Drugs), analysis strip.
-- Drug simulation: Bergman glucose/insulin curves (baseline vs treated) for metformin;
-  delta-model trajectories for lisinopril/ferrous/levothyroxine/salbutamol.
-- AI Dose Optimiser: dose-space search → recommended dose, baseline→predicted, confidence
-  bar, Claude rationale, safety caveats, doctor-confirm.
-- AI disease scan + AI case summary. Case report screen (deviation table, what-was-tried,
-  export/print). Save case.
-- Bergman validated: healthy meal peak ~132 mg/dL & settles; T2D ~204 & slow; metformin lowers.
-- Testing: backend 17/17 pass; frontend E2E flows pass. Fixed rec-dose unit bug + dialog a11y.
+- Home patient list (cards + search) + New patient + Virtual trials nav; 3 synthetic patients seeded.
+- Intake form → twin baseline. Twin Workspace: 3D imaging stage (layer switch, clickable
+  regions, amber-glow organs, breathing/heartbeat), reference panel + South-Asian toggle,
+  live stats, four-mode search bar, analysis strip, AI dose optimiser, disease scan, case report.
+- Bergman glucose engine validated (healthy ~132 & settles, T2D ~204 slow, metformin lowers).
+- Testing iteration_1: backend 17/17, frontend flows pass. Fixed rec-dose unit + dialog a11y.
+
+## Implemented — Phase 3 & 4 (2026-07-21, second iteration)
+- **Virtual Trials** (`/trials`): generate a cohort of synthetic twins, run a drug across a
+  dose sweep, show dose–response (in-range / responders / side-effects), per-twin scatter,
+  population breakdown, optimal population dose, and AI trial summary. `POST /api/trial/run`.
+- **Live Sensor Feed**: SSE `GET /api/sensor/stream/{pid}` (unauth, EventSource) streaming
+  synthetic sweat/wearable signals (lactate, cortisol, Na⁺, HR, SpO₂). Sweat glucose is NOT
+  read directly — sensor signals update model parameters and the twin predicts glucose.
+  Workspace `live-feed-btn` → LiveMonitor overlay + right-column live vitals update.
+- **Deeper Heart & Lung mechanistic models**: `simulate_cardiovascular` (PK/PD multi-agent
+  BP ODE) and `simulate_respiratory` (O2-Hb dissociation SpO₂ ODE) replace the delta model
+  for lisinopril/amlodipine and salbutamol.
+- **Combination Therapy**: added second-line drugs (empagliflozin, amlodipine); `/api/optimise`
+  proposes a two-drug regimen when a single agent can't reach the band (e.g. lisinopril+
+  amlodipine 137→125; metformin+empagliflozin). Combination-card in the optimiser UI.
+- Testing iteration_2: backend 27/27, frontend flows 100%, no critical issues.
 
 ## Backlog
-- **P1**: Sensor / MQTT live feed updating the twin in real time (Phase 3).
-- **P1**: Virtual clinical trials — cohort of synthetic twins, run a drug, response distribution (Phase 4).
-- **P2**: More mechanistic models (cardiovascular, renal, respiratory) replacing delta tiers.
-- **P2**: Physiology-link graph visualisation (interactive node trace) beyond text popover.
-- **P2**: Multi-drug combination optimisation; contraindication gating from patient context.
+- **P2**: More mechanistic models (renal, hepatic) replacing remaining delta tiers (ferrous, levo).
+- **P2**: Interactive physiology-link graph (node trace) beyond the text popover.
+- **P2**: Real MQTT broker ingestion + short-lived signed token to authenticate the SSE feed.
+- **P2**: Persist trial runs; multi-drug (>2) regimen search; split server.py into routes/ package.
 
 ## Next tasks
-- Phase 3 sensor ingestion, Phase 4 virtual trials, deeper mechanistic models.
+- Renal/hepatic mechanistic models; persisted/comparative trials; real sensor ingestion.
