@@ -2,7 +2,6 @@ import React from "react";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
 import {
   Stethoscope, Share2, Sliders, Pill, Waypoints,
@@ -15,25 +14,10 @@ const MODES = [
   { id: "drugs", label: "Drugs", icon: Pill },
 ];
 
-const PHYSIOLOGY = {
-  pancreas: "Pancreas → insulin secretion → peripheral glucose uptake & hepatic glucose output → fasting glucose + HbA1c",
-  heart: "Cardiac output × systemic vascular resistance → arterial pressure (systolic / diastolic) → organ perfusion",
-  lungs: "Alveolar gas exchange → arterial O₂ saturation (SpO₂) → chemoreceptor drive → heart rate",
-  thyroid: "Hypothalamic–pituitary axis → TSH → T3/T4 → basal metabolic rate → heart rate",
-  brain: "Autonomic centres → sympathetic/parasympathetic balance → heart rate & vascular tone",
-  blood: "Iron stores → haem synthesis → hemoglobin → O₂-carrying capacity",
-  liver: "Hepatic lipoprotein metabolism → LDL cholesterol clearance",
-  kidneys: "Renal RAAS activity → sodium/water handling → arterial pressure",
-};
-
 export default function TopSearchBar({
   mode, setMode, catalog, conditions, onToggleDisease,
-  activeDrug, onSelectDrug, onEditParams, selectedRegion, organs,
+  activeDrug, onSelectDrug, onEditParams, onOpenPhysMap, selectedRegion, organs,
 }) {
-  const organsInRegion = Object.entries(organs || {})
-    .filter(([, o]) => o.region === selectedRegion)
-    .map(([k]) => k);
-
   return (
     <div className="flex items-center gap-3">
       {/* segmented mode control */}
@@ -94,30 +78,11 @@ export default function TopSearchBar({
         )}
 
         {mode === "physiology" && (
-          <Popover>
-            <PopoverTrigger asChild>
-              <Button data-testid="physiology-btn" variant="outline" className="h-9 border-twin-line">
-                <Waypoints className="h-4 w-4" />
-                {selectedRegion ? `Trace from ${selectedRegion}` : "Select a body region first"}
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent className="w-96" data-testid="physiology-popover">
-              <div className="text-xs font-semibold uppercase tracking-widest text-twin-muted mb-2">
-                Physiology links · {selectedRegion || "—"}
-              </div>
-              {organsInRegion.length === 0 && (
-                <p className="text-xs text-twin-muted">Click an organ region on the body to trace its pathways.</p>
-              )}
-              <div className="space-y-2">
-                {organsInRegion.map((o) => (
-                  <div key={o} className="text-xs leading-relaxed">
-                    <span className="font-mono text-twin-teal uppercase">{organs[o].label}</span>
-                    <div className="text-twin-ink">{PHYSIOLOGY[o] || "Pathway mapping pending validation."}</div>
-                  </div>
-                ))}
-              </div>
-            </PopoverContent>
-          </Popover>
+          <Button data-testid="physiology-btn" variant="outline" onClick={onOpenPhysMap}
+            className="h-9 border-twin-line">
+            <Waypoints className="h-4 w-4" />
+            {selectedRegion ? `Open physiology map · ${selectedRegion}` : "Select a body region, then open the map"}
+          </Button>
         )}
       </div>
     </div>

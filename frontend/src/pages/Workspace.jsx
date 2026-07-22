@@ -10,6 +10,7 @@ import SimChart from "@/components/twin/SimChart";
 import TopSearchBar from "@/components/twin/TopSearchBar";
 import AnalysisStrip from "@/components/twin/AnalysisStrip";
 import LiveMonitor from "@/components/twin/LiveMonitor";
+import PhysiologyMap from "@/components/twin/PhysiologyMap";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -47,6 +48,7 @@ export default function Workspace() {
   const [editParams, setEditParams] = useState({});
   const [liveVitals, setLiveVitals] = useState({});
   const [showLive, setShowLive] = useState(false);
+  const [showPhysMap, setShowPhysMap] = useState(false);
   const liveTimer = useRef(null);
 
   const params = catalog?.parameters || {};
@@ -209,7 +211,8 @@ export default function Workspace() {
             mode={mode} setMode={setMode} catalog={catalog}
             conditions={patient.conditions || []} onToggleDisease={toggleDisease}
             activeDrug={activeDrug} onSelectDrug={selectDrug}
-            onEditParams={openEdit} selectedRegion={selectedRegion} organs={catalog.organs}
+            onEditParams={openEdit} onOpenPhysMap={() => setShowPhysMap(true)}
+            selectedRegion={selectedRegion} organs={catalog.organs}
           />
         </div>
 
@@ -331,6 +334,22 @@ export default function Workspace() {
               Save & re-baseline
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      {/* physiology map dialog */}
+      <Dialog open={showPhysMap} onOpenChange={setShowPhysMap}>
+        <DialogContent className="max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>Physiology map{selectedRegion ? ` · ${selectedRegion}` : ""}</DialogTitle>
+            <DialogDescription>Interactive pathway graph — click a node to trace its downstream effects on this patient's parameters.</DialogDescription>
+          </DialogHeader>
+          <PhysiologyMap
+            organKeys={Object.entries(catalog.organs)
+              .filter(([, o]) => !selectedRegion || o.region === selectedRegion)
+              .map(([k]) => k)}
+            organs={catalog.organs}
+            analysis={analysis}
+          />
         </DialogContent>
       </Dialog>
     </div>

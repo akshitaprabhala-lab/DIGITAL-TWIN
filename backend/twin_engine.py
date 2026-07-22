@@ -221,6 +221,77 @@ def simulate_respiratory(*, spo2_0, heart_rate0, drug_ic50, dose,
     }
 
 
+HEM_ABS = 0.11         # fraction of oral elemental iron absorbed (net)
+HEM_KSYN = 0.20        # g/dL/day max marrow Hb synthesis capacity
+HEM_KDEG = 1.0 / 120   # 1/day RBC turnover (120-day lifespan)
+HEM_IRON_PER_G = 150   # mg body iron per g/dL Hb synthesised (dose-limiting)
+HEM_HB_NORMAL = 14.0   # marrow set-point
+
+
+def simulate_hematologic(*, hb0, dose, duration_days=56, dt=0.25):
+    """Mechanistic erythropoiesis: oral iron -> stores -> iron-limited Hb
+    synthesis under EPO drive vs RBC turnover. Produces the characteristic
+    delayed (latent then rising) Hb correction curve."""
+    store = 0.0                       # relative iron store (starts depleted)
+    hb = hb0
+    times, hblist = [], []
+    steps = int(duration_days / dt)
+    for i in range(steps + 1):
+        t = i * dt
+        times.append(round(t, 1))
+        hblist.append(round(hb, 2))
+        absorbed = HEM_ABS * dose                      # mg/day into circulation
+        drive = max(0.0, min(1.0, (HEM_HB_NORMAL - hb) / HEM_HB_NORMAL))
+        cap = HEM_KSYN * (0.25 + 0.75 * drive)         # g/dL/day marrow capacity
+        iron_need = cap * HEM_IRON_PER_G
+        iron_avail = min(iron_need, absorbed + store)
+        synth = cap * (iron_avail / iron_need if iron_need > 0 else 0)
+        store += (absorbed - iron_avail) * dt
+        store = max(0.0, store)
+        hb += (synth - HEM_KDEG * (hb - 8.0) - HEM_KDEG * 0.0) * dt
+        hb = max(6.0, hb)
+    return {"times": times, "hemoglobin": hblist, "final_hemoglobin": round(hb, 2)}
+
+
+# ---------------------------------------------------------------------------
+# Endocrine mechanistic model — hypothalamic-pituitary-thyroid (HPT) axis
+#   levothyroxine dose -> free T4 -> sigmoid negative feedback on TSH.
+# ---------------------------------------------------------------------------
+ENDO_TSHMAX = 20.0     # mIU/L  max pituitary TSH output
+ENDO_T4_50 = 0.9       # ng/dL  free-T4 at half-max TSH suppression
+ENDO_N = 3.2           # feedback Hill coefficient
+ENDO_SDOSE = 0.0072    # ng/dL free-T4 rise per mcg/day levothyroxine
+ENDO_TAU_T4 = 7.0      # days  T4 equilibration (t1/2 ~ 7d)
+ENDO_TAU_TSH = 9.0     # days  TSH lag behind T4
+
+
+def _tsh_set(t4):
+    return ENDO_TSHMAX / (1.0 + (t4 / ENDO_T4_50) ** ENDO_N)
+
+
+def simulate_endocrine(*, tsh0, dose, duration_days=42, dt=0.25):
+    """HPT-axis model. Baseline endogenous T4 is inferred from the patient's
+    TSH so the twin is self-consistent, then levothyroxine raises T4 and TSH
+    falls along the feedback curve (over-replacement over-suppresses TSH)."""
+    ratio = max(1.001, ENDO_TSHMAX / max(0.05, tsh0))
+    t4_endo = ENDO_T4_50 * (ratio - 1.0) ** (1.0 / ENDO_N)
+    t4_ss = t4_endo + ENDO_SDOSE * dose
+    t4 = t4_endo
+    tsh = tsh0
+    times, tshlist, t4list = [], [], []
+    steps = int(duration_days / dt)
+    for i in range(steps + 1):
+        t = i * dt
+        times.append(round(t, 1))
+        tshlist.append(round(tsh, 2))
+        t4list.append(round(t4, 3))
+        t4 += (t4_ss - t4) / ENDO_TAU_T4 * dt
+        tsh += (_tsh_set(t4) - tsh) / ENDO_TAU_TSH * dt
+        tsh = max(0.02, tsh)
+    return {"times": times, "tsh": tshlist, "t4": t4list,
+            "final_tsh": round(tsh, 2), "final_t4": round(t4, 3)}
+
+
 if __name__ == "__main__":
     healthy = simulate_glucose(si_factor=1.0, beta_factor=1.0, basal_glucose=90)
     t2d = simulate_glucose(si_factor=0.35, beta_factor=0.45, basal_glucose=135)
@@ -248,6 +319,13 @@ if __name__ == "__main__":
                                             {"ec50": 1.2, "dose": 10, "imax": 0.16}])
     print("LIS40+AMLO10 -> systolic %.0f  diastolic %.0f" % (
         combo["final_systolic"], combo["final_diastolic"]))
+    for d in (0, 65, 130, 195):
+        h = simulate_hematologic(hb0=9.4, dose=d)
+        print("FERROUS %3dmg -> Hb %.1f (from 9.4)" % (d, h["final_hemoglobin"]))
+    for d in (0, 25, 75, 100, 150):
+        e = simulate_endocrine(tsh0=8.7, dose=d)
+        print("LEVO %3dmcg -> TSH %.2f  T4 %.2f (from 8.7)" % (
+            d, e["final_tsh"], e["final_t4"]))
     for d in (0, 100, 200, 400):
         rp = simulate_respiratory(spo2_0=91, heart_rate0=92, drug_ic50=90, dose=d)
         print("SALBUTAMOL %3dmcg -> peak SpO2 %.1f  final %.1f  peak HR %.0f" % (

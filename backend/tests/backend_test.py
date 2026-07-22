@@ -492,3 +492,146 @@ class TestSensorStream:
     def test_sse_unknown_patient(self):
         r = requests.get(f"{API}/sensor/stream/does-not-exist?seconds=2", timeout=10)
         assert r.status_code == 404
+
+
+# ---------------- Mechanistic Iron (hematologic) model ----------------
+class TestIronMechanistic:
+    """Priya Nair has Hb 9.4 g/dL — ferrous_sulfate should raise Hb via ODE."""
+
+    @pytest.fixture(scope="class")
+    def priya_id(self, auth_headers):
+        r = requests.get(f"{API}/patients", headers=auth_headers, timeout=15)
+        p = next((x for x in r.json() if x["name"] == "Priya Nair"), None)
+        assert p, "Priya Nair seed patient missing"
+        return p["id"]
+
+    def test_simulate_ferrous_sulfate_hb_rises(self, auth_headers, priya_id):
+        r = requests.post(f"{API}/simulate", headers=auth_headers,
+                          json={"patient_id": priya_id, "drug_id": "ferrous_sulfate",
+                                "dose": 130, "threshold": "standard"},
+                          timeout=30)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert d["system"] == "hematologic"
+        assert d["target"] == "hemoglobin"
+        assert d["x_label"] == "days"
+        assert d["series"] and len(d["series"]) > 5
+        # Hb should rise from ~9.4
+        assert d["series"][0]["treated"] <= d["series"][-1]["treated"], \
+            "treated Hb should be non-decreasing over time"
+        assert d["series"][-1]["treated"] > 9.4, \
+            f"treated final Hb {d['series'][-1]['treated']} should exceed 9.4"
+        assert 9.4 <= d["predicted_value"] <= 16.0
+
+    def test_ferrous_dose_sensitivity(self, auth_headers, priya_id):
+        r_low = requests.post(f"{API}/simulate", headers=auth_headers,
+                              json={"patient_id": priya_id, "drug_id": "ferrous_sulfate",
+                                    "dose": 65, "threshold": "standard"}, timeout=30)
+        r_hi = requests.post(f"{API}/simulate", headers=auth_headers,
+                             json={"patient_id": priya_id, "drug_id": "ferrous_sulfate",
+                                   "dose": 130, "threshold": "standard"}, timeout=30)
+        assert r_low.status_code == 200 and r_hi.status_code == 200
+        low_final = r_low.json()["series"][-1]["treated"]
+        hi_final = r_hi.json()["series"][-1]["treated"]
+        assert hi_final > low_final, \
+            f"130mg final Hb {hi_final} should exceed 65mg final Hb {low_final}"
+
+    def test_optimise_ferrous_sulfate(self, auth_headers, priya_id):
+        r = requests.post(f"{API}/optimise", headers=auth_headers,
+                          json={"patient_id": priya_id, "drug_id": "ferrous_sulfate",
+                                "threshold": "standard"}, timeout=60)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert d["drug"]["id"] == "ferrous_sulfate"
+        assert d["recommended_dose"] > 0
+        # trajectory embedded and mechanistic
+        assert d["trajectory"]["system"] == "hematologic"
+        assert d["predicted_value"] > d["baseline_value"], \
+            f"predicted {d['predicted_value']} should exceed baseline {d['baseline_value']}"
+
+
+# ---------------- Mechanistic Thyroid (endocrine) model ----------------
+class TestThyroidMechanistic:
+    """Priya has TSH 8.7 — levothyroxine should suppress TSH into 0.4–4.0 band."""
+
+    @pytest.fixture(scope="class")
+    def priya_id(self, auth_headers):
+        r = requests.get(f"{API}/patients", headers=auth_headers, timeout=15)
+        p = next((x for x in r.json() if x["name"] == "Priya Nair"), None)
+        assert p
+        return p["id"]
+
+    def test_simulate_levothyroxine_tsh_falls(self, auth_headers, priya_id):
+        r = requests.post(f"{API}/simulate", headers=auth_headers,
+                          json={"patient_id": priya_id, "drug_id": "levothyroxine",
+                                "dose": 75, "threshold": "standard"}, timeout=30)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert d["system"] == "endocrine"
+        assert d["target"] == "tsh"
+        assert d["x_label"] == "days"
+        assert d["series"] and len(d["series"]) > 5
+        # TSH must fall from ~8.7
+        assert d["series"][0]["treated"] >= d["series"][-1]["treated"]
+        assert d["series"][-1]["treated"] < 8.7
+
+    def test_optimise_levothyroxine_hits_band(self, auth_headers, priya_id):
+        r = requests.post(f"{API}/optimise", headers=auth_headers,
+                          json={"patient_id": priya_id, "drug_id": "levothyroxine",
+                                "threshold": "standard"}, timeout=60)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert d["drug"]["id"] == "levothyroxine"
+        lo, hi = d["band"]
+        # expected ~75 mcg → TSH ~3.3 within [0.4, 4.0]
+        assert lo <= d["predicted_value"] <= hi, \
+            f"predicted TSH {d['predicted_value']} not in band {d['band']}"
+        assert d["achieves_target"] is True
+        assert d["trajectory"]["system"] == "endocrine"
+
+
+# ---------------- Trial history persistence ----------------
+class TestTrialHistory:
+    def test_run_persists_and_list_and_detail(self, auth_headers):
+        # run a small trial
+        r = requests.post(f"{API}/trial/run", headers=auth_headers,
+                          json={"drug_id": "metformin", "cohort_size": 20, "seed": 11},
+                          timeout=90)
+        assert r.status_code == 200, r.text
+        run = r.json()
+        assert "id" in run and run["id"]
+        trial_id = run["id"]
+
+        # list is lightweight (no twins/dose_summary)
+        r_list = requests.get(f"{API}/trials", headers=auth_headers, timeout=15)
+        assert r_list.status_code == 200
+        rows = r_list.json()
+        assert isinstance(rows, list) and len(rows) >= 1
+        this_row = next((x for x in rows if x["id"] == trial_id), None)
+        assert this_row is not None, "just-run trial should appear in /api/trials list"
+        assert "twins" not in this_row, "list must exclude 'twins' (lightweight)"
+        assert "dose_summary" not in this_row, "list must exclude 'dose_summary'"
+        assert this_row["drug"]["id"] == "metformin"
+        assert this_row["cohort_size"] == 20
+        assert "best_dose" in this_row and this_row["best_dose"]["dose"]
+
+        # newest-first ordering
+        if len(rows) >= 2:
+            assert rows[0]["created_at"] >= rows[1]["created_at"]
+
+        # detail returns full doc with twins + dose_summary
+        r_det = requests.get(f"{API}/trials/{trial_id}", headers=auth_headers, timeout=15)
+        assert r_det.status_code == 200
+        det = r_det.json()
+        assert det["id"] == trial_id
+        assert "twins" in det and len(det["twins"]) == 20
+        assert "dose_summary" in det and len(det["dose_summary"]) >= 1
+        assert "summary" in det and isinstance(det["summary"], str)
+
+    def test_trial_detail_not_found(self, auth_headers):
+        r = requests.get(f"{API}/trials/does-not-exist", headers=auth_headers, timeout=10)
+        assert r.status_code == 404
+
+    def test_trials_list_requires_auth(self):
+        r = requests.get(f"{API}/trials", timeout=10)
+        assert r.status_code == 401

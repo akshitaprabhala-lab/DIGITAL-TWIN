@@ -1,0 +1,38 @@
+{
+  "summary": "TwinMed Phase-4 (Mechanistic Iron/Thyroid, Trial History, Physiology Map) fully validated end-to-end. Backend pytest 35/35 pass (46.9s) — added TestIronMechanistic (3 tests), TestThyroidMechanistic (2), TestTrialHistory (3). Ferrous sulfate 130mg → Hb 9.4→12.43, dose-sensitive (65mg lower than 130mg); levothyroxine 75 mcg → TSH 8.7→3.29 (in 0.4–4.0 band, achieves_target true); /api/trial/run persists w/ id, /api/trials returns newest-first lightweight list (no twins/dose_summary), /api/trials/{id} returns full doc with twins+dose_summary. Frontend Playwright: (a) Trial history — 9 rows shown on /trials, ticking 2 compare-* checkboxes reveals compare-view bar chart, open-trial-{id} reloads full trial into best-dose-card + trial-summary (978 chars). (b) Physiology Map — /workspace/{priya}, mode-physiology → physiology-btn opens dialog with physmap-svg + 8 organ tabs (pancreas, heart, lungs, liver, kidneys, thyroid, brain, blood). Switching to physmap-organ-thyroid renders HPT-axis (pituitary→TSH→thyroid→T4→BMR→heart_rate); TSH param node shows live patient value 8.7 mIU/L in amber (out-of-range). Clicking a node highlights downstream pathway. Regression: login, patient list, workspace load, reference panel + SA toggle, live vitals side panel all render correctly.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Environmental only: Marcus Bell seed patient was missing from Mongo when tests started (only Anaya + Priya + a stray 'a' patient present). I re-seeded Marcus Bell so the full 35-test suite could pass. Root cause: startup seed logic in server.py:startup() only inserts seed patients when the collection is empty — if a prior manual test deleted a seed patient, it is never restored. Consider changing to a per-patient upsert (check each seed name individually) so accidental deletions self-heal on next backend restart.",
+    "Optional: pytest emits 6 PytestRemovedIn10Warning for the class-scoped `marcus_id`/`anaya_id`/`priya_id` fixtures (defined as instance methods). Convert to @classmethod or move to conftest to silence."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 722 lines — crossed the 700-line split threshold. Extract routes (auth/patients/simulate/optimise/trials/sensor) into a `routes/` package next iteration to keep it under the limit.",
+    "server.py:startup() seed logic is non-idempotent for patients: only inserts when db.patients.count_documents({}) == 0. If any single seed patient gets deleted (as happened here with Marcus Bell), it is never restored. Change to a per-name upsert loop.",
+    "twin_engine.simulate_endocrine() infers baseline endogenous T4 from tsh0 via inverse Hill — nice self-consistency, but crashes silently if tsh0 <= 0.02 (ratio clamp at 1.001 makes (ratio-1)^(1/N) ≈ 0). Consider raising a validation error for non-physiologic inputs upstream.",
+    "twin_engine.simulate_hematologic() Hb decay term `-HEM_KDEG*(hb-8.0)` uses a hard-coded lower asymptote of 8.0 g/dL — reasonable but should be documented; it means untreated (dose=0) severe anemia will only settle at 8.0 not the patient's own hb0 if hb0 < 8.0. Fine for the seeded patients.",
+    "PhysiologyMap.jsx GRAPHS dictionary duplicates node ids across organs (e.g. `raas` appears in both `heart` and `kidneys`, `heart_rate` in lungs/brain/thyroid) — currently OK because each graph is rendered in isolation and downstream() runs against a single edge list, but the shared ids will be fragile if a future feature ever joins graphs. Consider namespacing (`heart.raas`, `kidneys.raas`).",
+    "PhysiologyMap.jsx has no aria labels on the SVG or nodes — accessibility issue for screen readers; add role='img' + aria-label to the <svg> and <title> children on each <g> node.",
+    "VirtualTrial.jsx `compareRows.length >= 2` gate is good, but there's no way to clear the compare selection except unticking one-by-one — add a small 'clear compare' link when compare.length > 0.",
+    "GET /api/trials returns ALL trials for ALL doctors (no doctor_id filter). Fine for a single-doctor demo but a multi-tenant deployment must filter by user['id'].",
+    "trials list projection excludes 'twins' and 'dose_summary' but still returns the full 'summary' (LLM text ~800-1000 chars per row) — payload grows linearly. Consider adding an ellipsis / preview field."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py (added TestIronMechanistic, TestThyroidMechanistic, TestTrialHistory — 8 new tests)"
+  ],
+  "success_rate": {"backend": "100% (35/35)", "frontend": "100% of tested flows (trial-history compare/open + physmap organ switch + node click + live param value)"},
+  "test_credentials": "Seeded doctor doctor@twinmed.app / twinmed123 (from /app/memory/test_credentials.md).",
+  "seed_data_creation": "Re-inserted Marcus Bell seed patient manually via scripted mongo insert (see action_items — startup seed was non-idempotent). Iron/Thyroid mechanistic tests exercise Priya Nair who is auto-seeded.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run: pytest /app/backend/tests/backend_test.py -v — 35 tests, ~47s. All Priya (Hb 9.4, TSH 8.7), Anaya (SA T2D), Marcus (HTN, hypoxia) seeds required. Beware: server.py's startup seed for patients is NOT per-name idempotent — if any seed patient is missing, either restart with an empty patients collection or manually re-insert (see /app/backend/catalog.seed_patients()). LLM (Claude Sonnet 4.6) 5-20s per call; use ≥30s timeouts on optimise/case-summary/disease-scan/trial-run. Trial history endpoints work; UI compare requires ≥2 rows.",
+  "rca_of_the_issue": "Not a bug in Phase-4 code, but env drift: previous testing agent(s) created 9 real trials that persist in db.trials (visible in trial-history table) — good, confirms /trial/run persistence is working. Marcus Bell had been deleted from db.patients between iterations; startup seed logic re-seeds only when collection is empty, so he never came back on restart. Mitigation applied: manually re-inserted via catalog.seed_patients(). Long-term fix documented in action_items."
+}

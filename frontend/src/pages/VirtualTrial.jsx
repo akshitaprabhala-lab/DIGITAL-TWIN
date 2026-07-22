@@ -9,10 +9,10 @@ import {
 } from "@/components/ui/select";
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
-  ScatterChart, Scatter, ReferenceArea, ZAxis,
+  ScatterChart, Scatter, ReferenceArea, ZAxis, BarChart, Bar,
 } from "recharts";
 import {
-  ArrowLeft, FlaskConical, Sparkles, Users, Loader2, TrendingUp, TriangleAlert,
+  ArrowLeft, FlaskConical, Sparkles, Users, Loader2, TrendingUp, TriangleAlert, History,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -23,18 +23,33 @@ export default function VirtualTrial() {
   const [size, setSize] = useState(60);
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [history, setHistory] = useState([]);
+  const [compare, setCompare] = useState([]);   // selected trial ids
 
-  useEffect(() => { api.get("/catalog").then((r) => setCatalog(r.data)); }, []);
+  const loadHistory = () => api.get("/trials").then((r) => setHistory(r.data));
+  useEffect(() => { api.get("/catalog").then((r) => setCatalog(r.data)); loadHistory(); }, []);
 
   const run = async () => {
     setBusy(true);
     try {
       const { data } = await api.post("/trial/run", { drug_id: drugId, cohort_size: size });
       setResult(data);
+      loadHistory();
       toast.success(`Trial complete · ${data.cohort_size} twins`);
     } catch (e) { toast.error("Trial failed"); }
     finally { setBusy(false); }
   };
+
+  const openTrial = async (id) => {
+    const { data } = await api.get(`/trials/${id}`);
+    setResult(data);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const toggleCompare = (id) => setCompare((c) =>
+    c.includes(id) ? c.filter((x) => x !== id) : (c.length < 4 ? [...c, id] : c));
+
+  const compareRows = history.filter((h) => compare.includes(h.id));
 
   const drug = catalog?.drugs?.find((d) => d.id === drugId);
   const [lo, hi] = result?.band || [0, 0];
@@ -88,6 +103,83 @@ export default function VirtualTrial() {
               </Button>
             </div>
           </section>
+
+          {/* trial history + compare */}
+          {history.length > 0 && (
+            <section className="bg-white border border-twin-line rounded-xl p-5" data-testid="trial-history">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-sm font-semibold uppercase tracking-widest text-twin-muted flex items-center gap-2">
+                  <History className="h-4 w-4" /> Trial history
+                </h2>
+                <span className="text-[11px] text-twin-muted font-mono">
+                  {compare.length ? `${compare.length} selected to compare` : "tick rows to compare"}
+                </span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs font-mono">
+                  <thead>
+                    <tr className="text-twin-muted text-left border-b border-twin-line">
+                      <th className="py-1.5 w-8"></th>
+                      <th className="font-medium">Drug</th>
+                      <th className="font-medium">Cohort</th>
+                      <th className="font-medium">Best dose</th>
+                      <th className="font-medium">In-range</th>
+                      <th className="font-medium">Side-fx</th>
+                      <th className="font-medium">When</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {history.map((h) => (
+                      <tr key={h.id} className="border-b border-twin-line/60 hover:bg-twin-panel">
+                        <td className="py-1.5">
+                          <input type="checkbox" data-testid={`compare-${h.id}`}
+                            checked={compare.includes(h.id)} onChange={() => toggleCompare(h.id)} />
+                        </td>
+                        <td>{h.drug.name}</td>
+                        <td>{h.cohort_size}</td>
+                        <td className="text-twin-teal font-semibold">{h.best_dose.dose} {h.drug.unit}</td>
+                        <td className="text-twin-teal">{h.best_dose.pct_in_range}%</td>
+                        <td className="text-twin-amber">{h.best_dose.pct_side_effect}%</td>
+                        <td className="text-twin-muted">{new Date(h.created_at).toLocaleDateString()} {new Date(h.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+                        <td>
+                          <button onClick={() => openTrial(h.id)} data-testid={`open-trial-${h.id}`}
+                            className="text-twin-teal hover:underline">open</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {compareRows.length >= 2 && (
+                <div className="mt-5 border-t border-twin-line pt-4" data-testid="compare-view">
+                  <div className="text-[11px] font-mono uppercase tracking-widest text-twin-muted mb-3">
+                    Side-by-side comparison
+                  </div>
+                  <div className="h-56">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={compareRows.map((h) => ({
+                        name: `${h.drug.name} n=${h.cohort_size}`,
+                        "In range": h.best_dose.pct_in_range,
+                        "Responders": h.best_dose.pct_responder,
+                        "Side-effect": h.best_dose.pct_side_effect,
+                      }))} margin={{ top: 6, right: 10, left: -12, bottom: 0 }}>
+                        <CartesianGrid stroke="#eee" vertical={false} />
+                        <XAxis dataKey="name" tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} />
+                        <YAxis tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} unit="%" />
+                        <Tooltip contentStyle={{ fontFamily: "IBM Plex Mono", fontSize: 11, borderRadius: 8 }} />
+                        <Legend wrapperStyle={{ fontSize: 11, fontFamily: "IBM Plex Mono" }} />
+                        <Bar dataKey="In range" fill="#0D9488" />
+                        <Bar dataKey="Responders" fill="#2563eb" />
+                        <Bar dataKey="Side-effect" fill="#D97706" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              )}
+            </section>
+          )}
 
           {!result && (
             <div className="text-center py-20 text-twin-muted">

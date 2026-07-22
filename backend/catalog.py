@@ -167,13 +167,13 @@ def predict_param_after_drug(params, drug, dose):
             heart_rate0=float(params.get("heart_rate", 80)),
             drug_ic50=drug["ic50"], dose=dose)
         return rp["peak_spo2"]
-    # delta model (hematologic / endocrine)
-    frac = drug_dose_fraction(drug, dose)
+    # mechanistic hematologic / endocrine
     if did == "ferrous_sulfate":
-        return float(params.get("hemoglobin", 12)) + 4.5 * frac
+        return twin_engine.simulate_hematologic(
+            hb0=float(params.get("hemoglobin", 11)), dose=dose)["final_hemoglobin"]
     if did == "levothyroxine":
-        cur = float(params.get("tsh", 4))
-        return max(0.2, cur - (cur - 1.5) * (0.85 * frac))
+        return twin_engine.simulate_endocrine(
+            tsh0=float(params.get("tsh", 6)), dose=dose)["final_tsh"]
     return float(params.get(drug["target_param"], 0))
 
 

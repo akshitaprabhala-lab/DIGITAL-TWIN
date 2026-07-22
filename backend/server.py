@@ -354,7 +354,27 @@ def build_trajectory(patient, drug, dose, threshold, meal_carbs, secondary=None,
             "predicted_value": rp["peak_spo2"], "peak_heart_rate": rp["peak_heart_rate"],
         }
 
-    # delta model (hematologic / endocrine)
+    if drug["system"] in ("hematologic", "endocrine"):
+        if drug["id"] == "ferrous_sulfate":
+            r = twin_engine.simulate_hematologic(
+                hb0=float(params.get("hemoglobin", 11)), dose=dose)
+            key = "hemoglobin"
+        else:
+            r = twin_engine.simulate_endocrine(
+                tsh0=float(params.get("tsh", 6)), dose=dose)
+            key = "tsh"
+        base_val = float(params.get(target, band[0]))
+        step = max(1, len(r["times"]) // 60)
+        series = [{"t": r["times"][i], "baseline": round(base_val, 2),
+                   "treated": r[key][i]} for i in range(0, len(r["times"]), step)]
+        return {
+            "system": drug["system"], "target": target, "target_label": p["label"],
+            "unit": p["unit"], "band": band, "x_label": "days", "x_unit": "d",
+            "series": series, "baseline_value": round(base_val, 2),
+            "predicted_value": r[f"final_{key}"],
+        }
+
+    # delta model fallback
     current = float(params.get(target, band[0]))
     predicted = catalog.predict_param_after_drug(params, drug, dose)
     days = drug.get("response_days") or 14
@@ -591,12 +611,33 @@ async def trial_run(body: TrialInput, user: dict = Depends(get_current_user)):
     summary_text = await llm_service.trial_summary(
         drug["name"], size, best, band, p["unit"], breakdown, f"trial-{body.drug_id}")
 
-    return {
+    result = {
+        "id": str(uuid.uuid4()),
         "drug": {"id": drug["id"], "name": drug["name"], "unit": drug["unit"]},
         "target_label": p["label"], "unit": p["unit"], "band": band, "cohort_size": size,
-        "dose_summary": dose_summary, "best_dose": best,
+        "threshold": body.threshold, "dose_summary": dose_summary, "best_dose": best,
         "breakdown": breakdown, "twins": twins, "summary": summary_text,
+        "doctor_id": user["id"], "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    await db.trials.insert_one({**result})
+    result.pop("_id", None)
+    return result
+
+
+@api.get("/trials")
+async def list_trials(user: dict = Depends(get_current_user)):
+    docs = await db.trials.find(
+        {}, {"_id": 0, "twins": 0, "dose_summary": 0}
+    ).sort("created_at", -1).to_list(100)
+    return docs
+
+
+@api.get("/trials/{tid}")
+async def get_trial(tid: str, user: dict = Depends(get_current_user)):
+    doc = await db.trials.find_one({"id": tid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Trial not found")
+    return doc
 
 
 # ---------------- Live sensor stream (SSE) ----------------
