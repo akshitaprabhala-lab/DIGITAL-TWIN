@@ -9,6 +9,7 @@ import DoseOptimiser from "@/components/twin/DoseOptimiser";
 import SimChart from "@/components/twin/SimChart";
 import TopSearchBar from "@/components/twin/TopSearchBar";
 import AnalysisStrip from "@/components/twin/AnalysisStrip";
+import LiveMonitor from "@/components/twin/LiveMonitor";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -16,7 +17,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "@/components/ui/dialog";
 import {
-  Home as HomeIcon, Plus, FileText, ScanSearch, Layers, Save, Loader2,
+  Home as HomeIcon, Plus, FileText, ScanSearch, Layers, Save, Loader2, Radio, FlaskConical,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -44,7 +45,8 @@ export default function Workspace() {
   const [scanBusy, setScanBusy] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [editParams, setEditParams] = useState({});
-  const [liveVital, setLiveVital] = useState(null);
+  const [liveVitals, setLiveVitals] = useState({});
+  const [showLive, setShowLive] = useState(false);
   const liveTimer = useRef(null);
 
   const params = catalog?.parameters || {};
@@ -125,15 +127,23 @@ export default function Workspace() {
       const step = 3;
       liveTimer.current = setInterval(() => {
         const pt = sim.series[i];
-        if (!pt) { clearInterval(liveTimer.current); setLiveVital(null); return; }
-        setLiveVital({ key: "fasting_glucose", value: pt.treated });
+        if (!pt) { clearInterval(liveTimer.current); setLiveVitals({}); return; }
+        setLiveVitals({ fasting_glucose: pt.treated });
         i += step;
       }, 90);
-    } else {
-      setLiveVital(null);
+    } else if (!showLive) {
+      setLiveVitals({});
     }
     return () => clearInterval(liveTimer.current);
-  }, [sim]);
+  }, [sim, showLive]);
+
+  const onSensorReading = useCallback((d) => {
+    setLiveVitals({
+      heart_rate: d.sensor.heart_rate,
+      spo2: d.sensor.spo2,
+      fasting_glucose: d.model_glucose,
+    });
+  }, []);
 
   const openEdit = () => {
     setEditParams({ ...patient.parameters });
@@ -207,6 +217,9 @@ export default function Workspace() {
           <Button data-testid="save-case-btn" variant="ghost" size="sm" onClick={saveCase}>
             <Save className="h-4 w-4" />
           </Button>
+          <Button data-testid="ws-trials-btn" variant="ghost" size="sm" onClick={() => nav("/trials")}>
+            <FlaskConical className="h-4 w-4" />
+          </Button>
           <Button data-testid="report-btn" variant="outline" size="sm" className="border-twin-line"
             onClick={() => nav(`/report/${patientId}`)}>
             <FileText className="h-4 w-4" /> Report
@@ -257,6 +270,10 @@ export default function Workspace() {
                 {scanBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ScanSearch className="h-4 w-4" />}
                 AI disease scan
               </Button>
+              <Button data-testid="live-feed-btn" size="sm" onClick={() => setShowLive((v) => !v)}
+                className={`border ${showLive ? "bg-twin-teal text-white border-twin-teal" : "bg-zinc-900 border-twin-darkline text-zinc-100 hover:bg-zinc-800"}`}>
+                <Radio className="h-4 w-4" /> {showLive ? "Stop live feed" : "Live sensor feed"}
+              </Button>
             </div>
 
             <TwinBody3D layer={layer} organStatus={organStatus}
@@ -266,6 +283,14 @@ export default function Workspace() {
             <div className="absolute bottom-3 left-4 right-4 z-10">
               <AnalysisStrip analysis={analysis} scanSummary={scanSummary} />
             </div>
+
+            {/* live sensor monitor */}
+            {showLive && (
+              <div className="absolute top-32 right-4 z-20">
+                <LiveMonitor patientId={patientId} onClose={() => { setShowLive(false); setLiveVitals({}); }}
+                  onReading={onSensorReading} />
+              </div>
+            )}
           </div>
 
           {/* simulation chart */}
@@ -278,7 +303,7 @@ export default function Workspace() {
 
         {/* RIGHT: stats + optimiser */}
         <aside className="col-span-3 border-l border-twin-line bg-twin-panel p-4 overflow-y-auto thin-scroll flex flex-col gap-4">
-          <StatsPanel analysis={analysis} parameters={params} liveVital={liveVital} />
+          <StatsPanel analysis={analysis} parameters={params} liveVitals={liveVitals} />
           <DoseOptimiser patientId={patientId} drug={activeDrug} threshold={threshold}
             onSim={setSim} onRec={setRec} rec={rec} />
         </aside>

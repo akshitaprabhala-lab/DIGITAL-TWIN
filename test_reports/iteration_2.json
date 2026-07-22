@@ -1,0 +1,36 @@
+{
+  "summary": "TwinMed Phase-3 features (Virtual Trials, Live Sensor SSE, Deeper Heart/Lung mechanistic models, Combination Therapy) fully validated end-to-end. Backend pytest suite extended from 17 → 27 tests (100% pass, 43.8s). All 4 new features work as specified: (1) POST /api/trial/run returns correct dose_summary/best_dose/breakdown/twins/AI summary for metformin, lisinopril, salbutamol; (2) SSE /api/sensor/stream/{pid}?seconds=3 streams JSON events at 0.5s cadence with sensor tiles + model_glucose then final {done:true} — unauthenticated as designed; (3) /api/simulate for lisinopril returns cardiovascular system with a days-scale systolic trajectory (treated < baseline, predicted 137 mmHg for Marcus at 20 mg) and salbutamol returns respiratory system with minutes-scale SpO2 rising above baseline; (4) /api/optimise correctly proposes a combination (lisinopril+amlodipine 40+10 → 125.3 mmHg vs single 137; metformin+empagliflozin on Anaya SA threshold). Frontend Playwright: login → Home Virtual-trials button → /trials page runs metformin (1250 mg/day best-dose, 81.7% responders) and salbutamol (200 mcg, 30% in-range) with best-dose-card, dose-response chart, per-twin scatter, breakdown bars, AI trial summary (~932 chars) all rendering. In Marcus workspace, live-feed-btn opens LiveMonitor overlay streaming model_glucose (108.5 mg/dL) + heart_rate/spo2 tiles; close-live-monitor closes it. Drugs mode → Lisinopril → AI optimise renders combination-card (Lisinopril 40 mg/day + Amlodipine 10 mg/day, combined 156 → 125.3). rec-dose unit bug from iteration_1 is FIXED (shows 'mg/day' correctly). No new critical issues.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "VirtualTrial charts + SimChart", "issues": ["Recharts width(-1)/height(-1) warning still appears on first mount of dose-response, scatter, and combination trajectory charts (already reported in iteration_1). Cosmetic — charts do render."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Optional: silence the Recharts width/height(-1) warning by pinning ResponsiveContainer wrappers to explicit min-height or gating render until layout settles (same as iteration_1 note)."
+  ],
+  "critical_code_review_comments": [
+    "server.py has grown to ~680 lines — still readable but approaching the 700-line split threshold. Consider extracting the trial + sensor + simulate routes into a `routes/` package on the next iteration.",
+    "sensor_stream endpoint is intentionally unauthenticated (EventSource limitation) — this is documented in the code comment and matches SSE best-practice; not a security issue for a research prototype but should be gated with a short-lived signed token if productionised.",
+    "trial_run: breakdown counts can double-count a twin as both `in_range` and `side_effect` (both flags fire independently). The current UI treats them as separate bars, which is fine, but the four categories don't strictly partition the cohort. Consider documenting the semantics in the response schema.",
+    "predict_combination for cardiovascular re-runs simulate_cardiovascular (ODE integration) inside a dose sweep — O(doses^2) work in optimise. Fine at current dose grid sizes (≤10 steps) but flag for scaling.",
+    "DoseOptimiser.jsx now correctly uses `rec.drug.unit` for the recommended-dose readout (iteration_1 bug fixed).",
+    "LiveMonitor.jsx closes the EventSource on unmount and on `done:true` sentinel — good. It relies on browser cookie for CORS not being sent (SSE fetches without credentials); since the endpoint is unauthenticated this is fine."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py (added TestDeeperModels, TestCombinationTherapy, TestVirtualTrial, TestSensorStream — 10 new tests)"
+  ],
+  "success_rate": {"backend": "100% (27/27)", "frontend": "100% of tested flows"},
+  "test_credentials": "Seeded doctor doctor@twinmed.app / twinmed123 (from /app/memory/test_credentials.md).",
+  "seed_data_creation": "None. Backend auto-seeds 3 patients (Anaya, Marcus, Priya). Trial cohorts are generated per-request from a seed and not persisted.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run: pytest /app/backend/tests/backend_test.py -v — 27 tests, ~44s. Uses REACT_APP_BACKEND_URL from env. LLM (Claude Sonnet 4.6) 5-20s per call; use ≥30s timeouts on optimise/case-summary/disease-scan/trial-run. SSE test uses `requests.get(stream=True).iter_lines()` and reads `data:` frames. Note: Recharts width(-1) warning is cosmetic and expected on first mount.",
+  "rca_of_the_issue": "No new bugs. Prior iteration_1 rec-dose unit bug (metformin showed '2000 mg/dL' instead of '2000 mg/day') has been fixed by main agent — DoseOptimiser.jsx line 105 now uses {rec.drug.unit}."
+}

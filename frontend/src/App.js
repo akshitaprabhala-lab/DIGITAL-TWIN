@@ -8,6 +8,7 @@ import Home from "@/pages/Home";
 import Intake from "@/pages/Intake";
 import Workspace from "@/pages/Workspace";
 import Report from "@/pages/Report";
+import VirtualTrial from "@/pages/VirtualTrial";
 
 function App() {
   return (
@@ -21,6 +22,7 @@ function App() {
             <Route path="/intake/:patientId" element={<ProtectedRoute><Intake /></ProtectedRoute>} />
             <Route path="/workspace/:patientId" element={<ProtectedRoute><Workspace /></ProtectedRoute>} />
             <Route path="/report/:patientId" element={<ProtectedRoute><Report /></ProtectedRoute>} />
+            <Route path="/trials" element={<ProtectedRoute><VirtualTrial /></ProtectedRoute>} />
           </Routes>
         </BrowserRouter>
         <Toaster position="top-right" theme="light" richColors />

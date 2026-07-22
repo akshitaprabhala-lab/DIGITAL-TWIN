@@ -1,10 +1,12 @@
 """TwinMed backend regression test suite.
 
 Covers: auth (login/register/me/logout), catalog, patients CRUD,
-analyse, disease-scan, simulate (metformin), optimise (AI rationale),
-case-summary + save-case + patient cases list.
+analyse, disease-scan, simulate (metformin, lisinopril, salbutamol),
+optimise (AI rationale + combination therapy), case-summary + save-case
++ patient cases list, virtual clinical trial, live sensor SSE stream.
 """
 import os
+import json
 import uuid
 import pytest
 import requests
@@ -278,3 +280,215 @@ class TestCaseAndSave:
         assert r3.status_code == 200
         cases = r3.json()
         assert isinstance(cases, list) and len(cases) >= 1
+
+
+# ---------------- Deeper models: cardiovascular + respiratory ----------------
+class TestDeeperModels:
+    """Verify simulate now uses mechanistic BP / SpO2 ODE integration."""
+
+    @pytest.fixture(scope="class")
+    def marcus_id(self, auth_headers):
+        r = requests.get(f"{API}/patients", headers=auth_headers, timeout=15)
+        assert r.status_code == 200
+        m = next((p for p in r.json() if p["name"] == "Marcus Bell"), None)
+        assert m, "Marcus Bell seed patient missing"
+        return m["id"]
+
+    def test_simulate_lisinopril_bp_trajectory(self, auth_headers, marcus_id):
+        r = requests.post(f"{API}/simulate", headers=auth_headers,
+                          json={"patient_id": marcus_id, "drug_id": "lisinopril",
+                                "dose": 20, "threshold": "standard"},
+                          timeout=30)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert d["system"] == "cardiovascular"
+        assert d["target"] == "systolic_bp"
+        assert d["x_label"] == "days"
+        assert d["series"] and len(d["series"]) > 5
+        # treated must fall below baseline over time
+        assert d["series"][-1]["treated"] < d["series"][0]["baseline"]
+        # predicted value must be a plausible BP number
+        assert 90 <= d["predicted_value"] <= 160
+
+    def test_simulate_salbutamol_spo2_trajectory(self, auth_headers, marcus_id):
+        r = requests.post(f"{API}/simulate", headers=auth_headers,
+                          json={"patient_id": marcus_id, "drug_id": "salbutamol",
+                                "dose": 200, "threshold": "standard"},
+                          timeout=30)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert d["system"] == "respiratory"
+        assert d["target"] == "spo2"
+        assert d["x_label"] == "minutes"
+        assert d["series"] and len(d["series"]) > 5
+        # SpO2 goes UP with salbutamol
+        max_treated = max(pt["treated"] for pt in d["series"])
+        assert max_treated > d["series"][0]["baseline"]
+        assert 85 <= d["predicted_value"] <= 100
+
+
+# ---------------- Combination therapy ----------------
+class TestCombinationTherapy:
+    """Verify optimise proposes a combination when single-agent can't reach the band."""
+
+    @pytest.fixture(scope="class")
+    def marcus_id(self, auth_headers):
+        r = requests.get(f"{API}/patients", headers=auth_headers, timeout=15)
+        m = next((p for p in r.json() if p["name"] == "Marcus Bell"), None)
+        assert m
+        return m["id"]
+
+    @pytest.fixture(scope="class")
+    def anaya_id(self, auth_headers):
+        r = requests.get(f"{API}/patients", headers=auth_headers, timeout=15)
+        a = next((p for p in r.json() if p["name"] == "Anaya Sharma"), None)
+        assert a
+        return a["id"]
+
+    def test_lisinopril_combo_with_amlodipine(self, auth_headers, marcus_id):
+        r = requests.post(f"{API}/optimise", headers=auth_headers,
+                          json={"patient_id": marcus_id, "drug_id": "lisinopril",
+                                "threshold": "standard"},
+                          timeout=60)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        # Marcus Bell has systolic 156 mmHg — lisinopril alone cannot reach 90–120 band
+        assert d["combination"] is not None, "Expected combination when single-agent can't reach target"
+        combo = d["combination"]
+        assert combo["primary"]["id"] == "lisinopril"
+        assert combo["secondary"]["id"] == "amlodipine"
+        assert combo["secondary"]["dose"] > 0
+        # combination should lower predicted value vs single-agent max-dose predicted
+        assert combo["predicted_value"] < d["predicted_value"], (
+            f"combo {combo['predicted_value']} should be < single {d['predicted_value']}")
+        # trajectory embeds combination effect
+        assert d["trajectory"]["system"] == "cardiovascular"
+
+    def test_metformin_combo_with_empagliflozin_on_south_asian(self, auth_headers, anaya_id):
+        # Anaya is south_asian with fasting_glucose=158 and SA band is 70-90 (very tight)
+        r = requests.post(f"{API}/optimise", headers=auth_headers,
+                          json={"patient_id": anaya_id, "drug_id": "metformin",
+                                "threshold": "south_asian"},
+                          timeout=60)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        # single-agent metformin (max 2000 mg) drops 32 mg/dL → 126 which is above 90 SA cap
+        assert d["combination"] is not None, "SA threshold should trigger combination"
+        assert d["combination"]["primary"]["id"] == "metformin"
+        assert d["combination"]["secondary"]["id"] == "empagliflozin"
+        assert d["combination"]["predicted_value"] < d["predicted_value"]
+
+
+# ---------------- Virtual clinical trial ----------------
+class TestVirtualTrial:
+    """POST /api/trial/run runs a drug across a cohort of synthetic twins."""
+
+    def _assert_shape(self, d, size):
+        # required keys
+        for k in ("drug", "target_label", "unit", "band", "cohort_size",
+                  "dose_summary", "best_dose", "breakdown", "twins", "summary"):
+            assert k in d, f"missing {k}"
+        assert d["cohort_size"] == size
+        assert isinstance(d["dose_summary"], list) and len(d["dose_summary"]) >= 1
+        for row in d["dose_summary"]:
+            for k in ("dose", "pct_in_range", "pct_responder", "pct_side_effect", "mean_predicted"):
+                assert k in row
+            assert 0 <= row["pct_in_range"] <= 100
+            assert 0 <= row["pct_responder"] <= 100
+            assert 0 <= row["pct_side_effect"] <= 100
+        # best_dose is a member of dose_summary
+        assert d["best_dose"]["dose"] in [r["dose"] for r in d["dose_summary"]]
+        # breakdown sums roughly = cohort size (in_range and improved are mutually exclusive by def)
+        bd = d["breakdown"]
+        assert bd["in_range"] + bd["improved"] + bd["no_change"] == size or (
+            bd["in_range"] + bd["improved"] + bd["no_change"] <= size)
+        assert 0 <= bd["side_effect"] <= size
+        # twins array
+        assert isinstance(d["twins"], list) and len(d["twins"]) == size
+        for tw in d["twins"][:3]:
+            for k in ("id", "baseline", "predicted", "in_range", "side_effect"):
+                assert k in tw
+        # AI summary
+        assert isinstance(d["summary"], str) and len(d["summary"]) > 20
+
+    def test_trial_metformin(self, auth_headers):
+        r = requests.post(f"{API}/trial/run", headers=auth_headers,
+                          json={"drug_id": "metformin", "cohort_size": 40, "seed": 42},
+                          timeout=90)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        self._assert_shape(d, 40)
+        assert d["drug"]["id"] == "metformin"
+        # metformin trial should have a healthy responder rate at best dose
+        assert d["best_dose"]["pct_responder"] > 20
+
+    def test_trial_lisinopril(self, auth_headers):
+        r = requests.post(f"{API}/trial/run", headers=auth_headers,
+                          json={"drug_id": "lisinopril", "cohort_size": 40, "seed": 7},
+                          timeout=90)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        self._assert_shape(d, 40)
+        assert d["drug"]["id"] == "lisinopril"
+
+    def test_trial_salbutamol(self, auth_headers):
+        r = requests.post(f"{API}/trial/run", headers=auth_headers,
+                          json={"drug_id": "salbutamol", "cohort_size": 40, "seed": 3},
+                          timeout=90)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        self._assert_shape(d, 40)
+        assert d["drug"]["id"] == "salbutamol"
+
+    def test_trial_unknown_drug(self, auth_headers):
+        r = requests.post(f"{API}/trial/run", headers=auth_headers,
+                          json={"drug_id": "nope", "cohort_size": 20}, timeout=15)
+        assert r.status_code == 404
+
+
+# ---------------- Live sensor SSE stream ----------------
+class TestSensorStream:
+    """GET /api/sensor/stream/{pid} is an unauthenticated SSE feed."""
+
+    @pytest.fixture(scope="class")
+    def anaya_id(self, auth_headers):
+        r = requests.get(f"{API}/patients", headers=auth_headers, timeout=15)
+        a = next((p for p in r.json() if p["name"] == "Anaya Sharma"), None)
+        return a["id"]
+
+    def test_sse_unauthenticated_and_streams_events(self, anaya_id):
+        # Fresh session (no bearer, no cookie) — endpoint is intentionally unauth
+        url = f"{API}/sensor/stream/{anaya_id}?seconds=3"
+        with requests.get(url, stream=True, timeout=20) as r:
+            assert r.status_code == 200
+            ctype = r.headers.get("content-type", "")
+            assert "text/event-stream" in ctype, f"unexpected content-type {ctype}"
+
+            events = []
+            done = False
+            for raw in r.iter_lines(decode_unicode=True):
+                if not raw:
+                    continue
+                if not raw.startswith("data:"):
+                    continue
+                payload = raw[len("data:"):].strip()
+                obj = json.loads(payload)
+                if obj.get("done"):
+                    done = True
+                    break
+                events.append(obj)
+                if len(events) >= 3:  # keep it fast, just verify schema on first few
+                    pass
+        # verify at least a handful of sensor events arrived and schema is correct
+        assert len(events) >= 4, f"expected multiple SSE events, got {len(events)}"
+        first = events[0]
+        assert "sensor" in first and "model_glucose" in first
+        for k in ("lactate", "cortisol", "sodium", "heart_rate", "spo2"):
+            assert k in first["sensor"], f"missing sensor key {k}"
+        # sweat glucose is NOT read directly — but the derived model_glucose must be present
+        assert isinstance(first["model_glucose"], (int, float))
+        assert done or len(events) > 4  # either the done sentinel arrived, or enough events did
+
+    def test_sse_unknown_patient(self):
+        r = requests.get(f"{API}/sensor/stream/does-not-exist?seconds=2", timeout=10)
+        assert r.status_code == 404

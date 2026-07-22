@@ -6,7 +6,7 @@ import Banner from "@/components/Banner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
-  Activity, Plus, Search, LogOut, ChevronRight, HeartPulse, Trash2,
+  Activity, Plus, Search, LogOut, ChevronRight, HeartPulse, Trash2, FlaskConical,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -64,10 +64,16 @@ export default function Home() {
               <h1 className="text-3xl font-semibold tracking-tight">Patients</h1>
               <p className="text-sm text-twin-muted mt-1">Open a twin or intake a new patient.</p>
             </div>
-            <Button data-testid="new-patient-btn" onClick={() => nav("/intake")}
-              className="bg-twin-teal hover:bg-teal-700 text-white">
-              <Plus className="h-4 w-4" /> New patient
-            </Button>
+            <div className="flex gap-2">
+              <Button data-testid="new-patient-btn" onClick={() => nav("/intake")}
+                className="bg-twin-teal hover:bg-teal-700 text-white">
+                <Plus className="h-4 w-4" /> New patient
+              </Button>
+              <Button data-testid="trials-nav-btn" variant="outline" onClick={() => nav("/trials")}
+                className="border-twin-line">
+                <FlaskConical className="h-4 w-4" /> Virtual trials
+              </Button>
+            </div>
           </div>
 
           <div className="relative mb-6 max-w-md">

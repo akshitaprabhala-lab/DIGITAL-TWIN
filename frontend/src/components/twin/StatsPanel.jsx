@@ -1,8 +1,9 @@
 import React from "react";
 import { Activity } from "lucide-react";
 
-export default function StatsPanel({ analysis, parameters, liveVital }) {
+export default function StatsPanel({ analysis, parameters, liveVitals }) {
   const fmt = (v, key) => Number(v).toFixed(parameters[key]?.decimals ?? 0);
+  const live = liveVitals || {};
   return (
     <div>
       <div className="flex items-center justify-between mb-3">
@@ -15,9 +16,8 @@ export default function StatsPanel({ analysis, parameters, liveVital }) {
       </div>
       <div className="grid grid-cols-2 gap-1.5">
         {(analysis || []).map((a) => {
-          const isLive = liveVital && liveVital.key === a.key;
-          const value = isLive ? liveVital.value : a.value;
-          const live = isLive || a.in_range;
+          const isLive = a.key in live;
+          const value = isLive ? live[a.key] : a.value;
           return (
             <div
               key={a.key}
